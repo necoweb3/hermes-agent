@@ -605,10 +605,32 @@ class TestIdempotency:
             assert resp1.status == 202
 
             # Backdate the cache entry so it appears expired
-            adapter._seen_deliveries["delivery-456"] = time.time() - 3700
+            adapter._seen_deliveries["idem:delivery-456"] = time.time() - 3700
 
             resp2 = await cli.post("/webhooks/idem", json={"x": 1}, headers=headers)
             assert resp2.status == 202  # re-accepted
+
+    @pytest.mark.asyncio
+    async def test_same_delivery_id_allowed_on_different_routes(self):
+        """Delivery IDs are deduplicated per route, not globally."""
+        routes = {
+            "route-a": {"secret": _INSECURE_NO_AUTH, "prompt": "test a"},
+            "route-b": {"secret": _INSECURE_NO_AUTH, "prompt": "test b"},
+        }
+        adapter = _make_adapter(routes=routes)
+        adapter.handle_message = AsyncMock()
+
+        app = _create_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            headers = {"X-GitHub-Delivery": "shared-delivery"}
+            resp1 = await cli.post("/webhooks/route-a", json={"a": 1}, headers=headers)
+            assert resp1.status == 202
+
+            resp2 = await cli.post("/webhooks/route-b", json={"b": 1}, headers=headers)
+            assert resp2.status == 202
+
+        assert "route-a:shared-delivery" in adapter._seen_deliveries
+        assert "route-b:shared-delivery" in adapter._seen_deliveries
 
     @pytest.mark.asyncio
     async def test_svix_id_used_as_delivery_id_for_deduplication(self):

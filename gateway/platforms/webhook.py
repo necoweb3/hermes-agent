@@ -500,6 +500,7 @@ class WebhookAdapter(BasePlatformAdapter):
                 request.headers.get("X-Request-ID", str(int(time.time() * 1000))),
             ),
         )
+        idempotency_key = f"{route_name}:{delivery_id}"
 
         # ── Idempotency ─────────────────────────────────────────
         # Skip duplicate deliveries (webhook retries).
@@ -510,15 +511,17 @@ class WebhookAdapter(BasePlatformAdapter):
             for k, v in self._seen_deliveries.items()
             if now - v < self._idempotency_ttl
         }
-        if delivery_id in self._seen_deliveries:
+        if idempotency_key in self._seen_deliveries:
             logger.info(
-                "[webhook] Skipping duplicate delivery %s", delivery_id
+                "[webhook] Skipping duplicate delivery %s on route %s",
+                delivery_id,
+                route_name,
             )
             return web.json_response(
                 {"status": "duplicate", "delivery_id": delivery_id},
                 status=200,
             )
-        self._seen_deliveries[delivery_id] = now
+        self._seen_deliveries[idempotency_key] = now
 
         # ── Direct delivery mode (deliver_only) ─────────────────
         # Skip the agent entirely — the rendered prompt IS the message we
