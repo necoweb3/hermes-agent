@@ -45,10 +45,20 @@ _HARDLINE_BLOCK = [
     "rm -rf ~/",
     "rm -rf ~/*",
     "rm -rf $HOME",
+    "Remove-Item -Recurse -Force C:\\",
+    r"Remove-Item -Recurse $HOME\*",
+    "rd /s /q C:\\",
+    r"del /s /q C:\*",
     # Filesystem format
     "mkfs.ext4 /dev/sda1",
     "mkfs /dev/sdb",
     "mkfs.xfs /dev/nvme0n1",
+    "Format-Volume -DriveLetter C -Force",
+    "format C: /FS:NTFS /Q /Y",
+    "format.com D: /Q /Y",
+    "Clear-Disk -Number 0 -RemoveData -Confirm:$false",
+    "Remove-Partition -DiskNumber 0 -PartitionNumber 1 -Confirm:$false",
+    "diskpart /s wipe.txt",
     # Raw block device overwrites
     "dd if=/dev/zero of=/dev/sda bs=1M",
     "dd if=/dev/urandom of=/dev/nvme0n1",
@@ -85,6 +95,8 @@ _HARDLINE_BLOCK = [
     "exec shutdown",
     "nohup reboot",
     "setsid poweroff",
+    "Restart-Computer -Force",
+    "Stop-Computer -Force",
 ]
 
 
@@ -98,6 +110,9 @@ _HARDLINE_ALLOW = [
     "rm -rf /home/user/scratch",  # subpath of /home, not /home itself
     "rm -rf ~/Downloads/old",
     "rm -rf $HOME/tmp",
+    r"Remove-Item -Recurse C:\Users\alice\scratch",
+    r"rd /s /q C:\Users\alice\scratch",
+    r"del /s /q C:\Users\alice\scratch",
     "rm foo.txt",
     "rm -rf some/path",
     # dd to regular files
@@ -112,6 +127,9 @@ _HARDLINE_ALLOW = [
     # Unrelated commands that happen to contain the trigger word
     "grep 'shutdown' logs.txt",
     "echo reboot",
+    "echo Restart-Computer",
+    "echo Format-Volume -DriveLetter C",
+    "echo diskpart /s wipe.txt",
     "echo '# init 0 in comment'",
     "cat rebooting.log",
     "echo 'halt and catch fire'",

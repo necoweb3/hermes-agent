@@ -8,6 +8,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch as mock_patch
 
+import pytest
+
 import tools.approval as approval_module
 from hermes_constants import get_hermes_home
 from tools.approval import (
@@ -260,6 +262,78 @@ class TestRmRecursiveFlagVariants:
         dangerous, key, desc = detect_dangerous_command("sudo rm -rf /tmp")
         assert dangerous is True
         assert key is not None
+
+
+class TestWindowsRecursiveDeleteVariants:
+    """Windows-native recursive delete forms must require approval too."""
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            r"Remove-Item -Recurse -Force C:\Users\victim\project",
+            r"Remove-Item -r -fo C:\Users\victim\project",
+            r"ri -r -fo C:\Users\victim\project",
+            r"del /s /q C:\Users\victim\project",
+            r"erase /s /q C:\Users\victim\project",
+            r"rmdir /s /q C:\Users\victim\project",
+            r"rd /s /q C:\Users\victim\project",
+        ],
+    )
+    def test_windows_recursive_delete_detected(self, cmd):
+        dangerous, key, desc = detect_dangerous_command(cmd)
+        assert dangerous is True
+        assert key is not None
+        assert "windows recursive delete" in desc.lower()
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            "Remove-Item file.txt",
+            "del file.txt",
+            "rmdir empty-dir",
+            "echo Remove-Item -Recurse C:\\",
+        ],
+    )
+    def test_non_recursive_or_quoted_windows_delete_safe(self, cmd):
+        dangerous, key, desc = detect_dangerous_command(cmd)
+        assert dangerous is False
+        assert key is None
+        assert desc is None
+
+
+class TestWindowsServiceAndLogTampering:
+    """Windows service control and log tampering must require approval."""
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            "Stop-Service -Name WinDefend -Force",
+            "Restart-Service -Name Spooler -Force",
+            "sc stop WinDefend",
+            "sc delete WinDefend",
+            "Clear-EventLog -LogName System",
+            "wevtutil cl System",
+        ],
+    )
+    def test_windows_service_and_log_tampering_detected(self, cmd):
+        dangerous, key, desc = detect_dangerous_command(cmd)
+        assert dangerous is True
+        assert key is not None
+        assert "windows" in desc.lower()
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            "sc query WinDefend",
+            "wevtutil gl System",
+            "Get-EventLog -LogName System",
+        ],
+    )
+    def test_windows_service_and_log_read_only_safe(self, cmd):
+        dangerous, key, desc = detect_dangerous_command(cmd)
+        assert dangerous is False
+        assert key is None
+        assert desc is None
 
 
 class TestMultilineBypass:

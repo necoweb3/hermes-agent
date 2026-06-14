@@ -233,8 +233,9 @@ _COMMAND_TAIL = r'(?:\s*(?:&&|\|\||;).*)?$'
 # alone.
 #
 # The list is deliberately tiny — only things with no recovery path:
-# filesystem destruction rooted at /, raw block device overwrites, kernel
-# shutdown/reboot, and denial-of-service commands that take the host down.
+# filesystem destruction rooted at /, raw block device overwrites, disk
+# formatting/partition removal, kernel shutdown/reboot, and denial-of-service
+# commands that take the host down.
 # Recoverable-but-costly operations (git reset --hard, rm -rf /tmp/x,
 # chmod -R 777, curl|sh) stay in DANGEROUS_PATTERNS where yolo can pass
 # them through — that's what yolo is for.
@@ -257,13 +258,27 @@ _CMDPOS = (
     r'\s*'
 )
 
+_WINDOWS_ROOT_OR_HOME_TARGET = (
+    r'(?:[a-z]:(?:[\\/](?:\*)?|\*)|~(?:[\\/](?:\*)?|\*)?|\$home(?:[\\/](?:\*)?|\*)?)'
+    r'(?=$|[\s"\';&|])'
+)
+
 HARDLINE_PATTERNS = [
     # rm recursive targeting the root filesystem or protected roots
     (r'\brm\s+(-[^\s]*\s+)*(/|/\*|/ \*)(\s|$)', "recursive delete of root filesystem"),
     (r'\brm\s+(-[^\s]*\s+)*(/home|/home/\*|/root|/root/\*|/etc|/etc/\*|/usr|/usr/\*|/var|/var/\*|/bin|/bin/\*|/sbin|/sbin/\*|/boot|/boot/\*|/lib|/lib/\*)(\s|$)', "recursive delete of system directory"),
     (r'\brm\s+(-[^\s]*\s+)*(~|\$HOME)(/?|/\*)?(\s|$)', "recursive delete of home directory"),
+    (_CMDPOS + r'(?:remove-item|ri)\b(?=[^;&|\n]*\s-(?:r|recurse)\b)[^;&|\n]*' + _WINDOWS_ROOT_OR_HOME_TARGET, "recursive delete of Windows root/home"),
+    (_CMDPOS + r'(?:rmdir|rd)\b(?=[^;&|\n]*/s\b)[^;&|\n]*' + _WINDOWS_ROOT_OR_HOME_TARGET, "recursive delete of Windows root/home"),
+    (_CMDPOS + r'(?:del|erase)\b(?=[^;&|\n]*/s\b)[^;&|\n]*' + _WINDOWS_ROOT_OR_HOME_TARGET, "recursive delete of Windows root/home"),
     # Filesystem format
     (r'\bmkfs(\.[a-z0-9]+)?\b', "format filesystem (mkfs)"),
+    (
+        _CMDPOS
+        + r'(?:format-volume\b|format(?:\.(?:com|exe))?\s+[a-z]:|clear-disk\b|remove-partition\b)',
+        "Windows disk-destructive command",
+    ),
+    (_CMDPOS + r'diskpart(?:\.exe)?\b(?=[^;&|\n]*/s\b)', "diskpart script execution"),
     # Raw block device overwrites (dd + redirection)
     (r'\bdd\b[^\n]*\bof=/dev/(sd|nvme|hd|mmcblk|vd|xvd)[a-z0-9]*', "dd to raw block device"),
     (r'>\s*/dev/(sd|nvme|hd|mmcblk|vd|xvd)[a-z0-9]*\b', "redirect to raw block device"),
@@ -276,6 +291,7 @@ HARDLINE_PATTERNS = [
     # false-positive on "echo reboot" or "grep 'shutdown' logs".
     # _CMDPOS matches start-of-command positions.
     (_CMDPOS + r'(shutdown|reboot|halt|poweroff)\b', "system shutdown/reboot"),
+    (_CMDPOS + r'(?:restart-computer|stop-computer)\b', "Windows system shutdown/reboot"),
     (_CMDPOS + r'init\s+[06]\b', "init 0/6 (shutdown/reboot)"),
     (_CMDPOS + r'systemctl\s+(poweroff|reboot|halt|kexec)\b', "systemctl poweroff/reboot"),
     (_CMDPOS + r'telinit\s+[06]\b', "telinit 0/6 (shutdown/reboot)"),
@@ -379,6 +395,9 @@ DANGEROUS_PATTERNS = [
     (r'\brm\s+(-[^\s]*\s+)*/', "delete in root path"),
     (r'\brm\s+-[^\s]*r', "recursive delete"),
     (r'\brm\s+--recursive\b', "recursive delete (long flag)"),
+    (_CMDPOS + r'(?:remove-item|ri|del|erase)\b(?=[^;&|\n]*\s-(?:r|recurse)\b)', "Windows recursive delete"),
+    (_CMDPOS + r'(?:rmdir|rd)\b(?=[^;&|\n]*/s\b)', "Windows recursive delete"),
+    (_CMDPOS + r'(?:del|erase)\b(?=[^;&|\n]*/s\b)', "Windows recursive delete"),
     (r'\bchmod\s+(-[^\s]*\s+)*(777|666|o\+[rwx]*w|a\+[rwx]*w)\b', "world/other-writable permissions"),
     (r'\bchmod\s+--recursive\b.*(777|666|o\+[rwx]*w|a\+[rwx]*w)', "recursive world/other-writable (long flag)"),
     (r'\bchown\s+(-[^\s]*)?R\s+root', "recursive chown to root"),
@@ -393,6 +412,12 @@ DANGEROUS_PATTERNS = [
     (r'\bTRUNCATE\s+(TABLE)?\s*\w', "SQL TRUNCATE"),
     (rf'>\s*{_SYSTEM_CONFIG_PATH}', "overwrite system config"),
     (r'\bsystemctl\s+(-[^\s]+\s+)*(stop|restart|disable|mask)\b', "stop/restart system service"),
+    (
+        _CMDPOS
+        + r'(?:stop-service|restart-service|sc\s+(?:stop|delete)\b|sc\s+config\b(?=[^;&|\n]*\bstart\s*=\s*disabled\b))',
+        "Windows service control",
+    ),
+    (_CMDPOS + r'(?:clear-eventlog\b|wevtutil(?:\.exe)?\s+cl\b)', "Windows event log clearing"),
     (r'\bkill\s+-9\s+-1\b', "kill all processes"),
     (r'\bpkill\s+-9\b', "force kill processes"),
     # killall with SIGKILL (parallel to pkill -9). Catches -9 / -KILL /
@@ -569,24 +594,44 @@ def _normalize_command_for_detection(command: str) -> str:
     command = command.replace('\x00', '')
     # Normalize Unicode (fullwidth Latin, halfwidth Katakana, etc.)
     command = unicodedata.normalize('NFKC', command)
-    # Strip shell backslash-escapes: r\m → rm. Prevents \-injection bypass.
-    command = re.sub(r'\\([^\n])', r'\1', command)
-    # Strip empty-string literals that split tokens: r''m → rm, r"\"m → rm.
-    command = re.sub(r"''|\"\"", '', command)
-    # Fold the current user's resolved absolute home path into ~/ at detection
-    # time so static user-sensitive patterns catch /home/alice/.bashrc the same
-    # way they catch ~/.bashrc. Do not snapshot this at import time: tests and
-    # profile/session launchers can set HOME after this module is imported.
-    command = _rewrite_resolved_user_home(command)
-    # Fold the resolved absolute active-profile home path into the canonical
-    # ~/.hermes/ form so the Hermes config/env patterns catch it. In Docker and
-    # gateway deployments the agent often references the resolved absolute path
-    # directly (e.g. `sed -i ... /home/hermes/.hermes/config.yaml`) rather than
-    # ~, $HOME, or $HERMES_HOME. Done at detection time (not via an import-time
-    # pattern snapshot) so it tracks the live HERMES_HOME even when that is set
-    # after this module is imported — as the hermetic test conftest does.
+    # Fold the resolved active-profile Hermes home before the broader user-home
+    # rewrite so ~/.hermes/config.yaml patterns still match on Windows.
     command = _rewrite_resolved_hermes_home(command)
+    # Fold the current user's resolved absolute home path into ~/ at detection
+    # time so static user-sensitive patterns catch C:\Users\alice\.ssh the
+    # same way they catch ~/.ssh. Do not snapshot this at import time: tests
+    # and profile/session launchers can set HOME after this module is imported.
+    command = _rewrite_resolved_user_home(command)
+    command = _normalize_rewritten_home_path_separators(command)
+    # Strip shell backslash-escapes after resolved path rewrites so Windows
+    # absolute paths are not collapsed before they can be matched.
+    command = re.sub(r'\\([^\n])', r'\1', command)
+    # Strip empty-string literals that split tokens: r''m -> rm, r"\"m -> rm.
+    command = re.sub(r"''|\"\"", '', command)
     return command
+
+
+def _path_prefix_variants(path: str) -> list[str]:
+    variants: list[str] = []
+    for candidate in (path, path.replace("\\", "/"), path.replace("/", "\\")):
+        candidate = candidate.rstrip("/\\")
+        if candidate and candidate not in variants:
+            variants.append(candidate)
+    return variants
+
+
+def _normalize_rewritten_home_path_separators(command: str) -> str:
+    """Convert Windows separators in rewritten ~/ and $HOME paths to POSIX."""
+
+    def _replace(match: re.Match[str]) -> str:
+        return match.group(0).replace("\\", "/")
+
+    return re.sub(
+        r'(?<!\w)(?:~|\$home)(?:[\\/][^\s"\';&|]*)+',
+        _replace,
+        command,
+        flags=re.IGNORECASE,
+    )
 
 
 def _rewrite_resolved_user_home(command: str) -> str:
@@ -598,11 +643,18 @@ def _rewrite_resolved_user_home(command: str) -> str:
     degenerate.
     """
     try:
+        env_home = os.environ.get("HOME")
+        candidates = []
+        if env_home:
+            candidates.extend([
+                env_home.rstrip("/"),
+                os.path.realpath(env_home).rstrip("/"),
+            ])
         home = os.path.expanduser("~")
-        candidates = [
+        candidates.extend([
             home.rstrip("/"),
             os.path.realpath(home).rstrip("/"),
-        ]
+        ])
     except Exception:
         return command
     seen: set[str] = set()
@@ -612,10 +664,16 @@ def _rewrite_resolved_user_home(command: str) -> str:
         seen.add(path)
         # Require an absolute path below root so a bad HOME cannot rewrite the
         # whole filesystem namespace.
-        normalized = path.rstrip("/")
-        if not normalized.startswith("/") or normalized.count("/") < 2:
+        normalized = path.rstrip("/\\")
+        parts = [
+            part for part in normalized.replace("\\", "/").strip("/").split("/")
+            if part
+        ]
+        if not os.path.isabs(normalized) or len(parts) < 2:
             continue
-        command = command.replace(normalized + "/", "~/")
+        for variant in _path_prefix_variants(normalized):
+            command = command.replace(variant + "/", "~/")
+            command = command.replace(variant + "\\", "~/")
     return command
 
 
@@ -645,10 +703,16 @@ def _rewrite_resolved_hermes_home(command: str) -> str:
         # unrelated paths: require an absolute path with at least one non-root
         # component. The active profile home is always a real directory like
         # /home/hermes/.hermes or a per-test tempdir, never a bare root.
-        normalized = path.rstrip("/")
-        if not normalized.startswith("/") or normalized.count("/") < 2:
+        normalized = path.rstrip("/\\")
+        parts = [
+            part for part in normalized.replace("\\", "/").strip("/").split("/")
+            if part
+        ]
+        if not os.path.isabs(normalized) or len(parts) < 2:
             continue
-        command = command.replace(normalized + "/", "~/.hermes/")
+        for variant in _path_prefix_variants(normalized):
+            command = command.replace(variant + "/", "~/.hermes/")
+            command = command.replace(variant + "\\", "~/.hermes/")
     return command
 
 
