@@ -6623,15 +6623,19 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         _MAX_FINALIZE_RETRIES = 3
         while self._running:
             try:
-                self.session_store._ensure_loaded()
-                # Collect expired sessions first, then log a single summary.
-                _expired_entries = []
-                for key, entry in list(self.session_store._entries.items()):
-                    if entry.expiry_finalized:
-                        continue
-                    if not self.session_store._is_session_expired(entry):
-                        continue
-                    _expired_entries.append((key, entry))
+                # Snapshot expired entries under the session-store lock to
+                # prevent RuntimeError from concurrent dict mutation by
+                # thread-pool callers (batch runner, cron worker).
+                with self.session_store._lock:  # noqa: SLF001
+                    self.session_store._ensure_loaded_locked()  # noqa: SLF001
+                    # Collect expired sessions first, then log a single summary.
+                    _expired_entries = []
+                    for key, entry in list(self.session_store._entries.items()):  # noqa: SLF001
+                        if entry.expiry_finalized:
+                            continue
+                        if not self.session_store._is_session_expired(entry):
+                            continue
+                        _expired_entries.append((key, entry))
 
                 if _expired_entries:
                     # Extract platform names from session keys for a compact summary.
