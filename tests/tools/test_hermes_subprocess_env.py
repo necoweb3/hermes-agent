@@ -124,6 +124,26 @@ class TestTierInvariants:
     def test_tier1_covers_infra_secrets(self):
         assert {"MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET", "DAYTONA_API_KEY"} <= _ALWAYS_STRIP_KEYS
 
+    def test_tier1_covers_messaging_platform_secrets(self):
+        assert {
+            "MATRIX_ACCESS_TOKEN",
+            "MATRIX_PASSWORD",
+            "MATRIX_RECOVERY_KEY",
+            "TEAMS_CLIENT_SECRET",
+            "TEAMS_INCOMING_WEBHOOK_URL",
+            "TEAMS_GRAPH_ACCESS_TOKEN",
+            "FEISHU_APP_SECRET",
+            "FEISHU_VERIFICATION_TOKEN",
+            "FEISHU_ENCRYPT_KEY",
+            "WECOM_SECRET",
+            "DINGTALK_CLIENT_SECRET",
+            "DINGTALK_APP_SECRET",
+            "MATTERMOST_TOKEN",
+            "NTFY_TOKEN",
+            "TWILIO_AUTH_TOKEN",
+        } <= _ALWAYS_STRIP_KEYS
+
+
 
 class TestBrowserPassthroughPattern:
     def test_browser_keys_recoverable_after_strip(self):
