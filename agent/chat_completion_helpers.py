@@ -1632,7 +1632,12 @@ def handle_max_iterations(agent, messages: list, api_call_count: int) -> str:
 
     except Exception as e:
         logger.warning(f"Failed to get summary response: {e}")
-        final_response = f"I reached the maximum iterations ({agent.max_iterations}) but couldn't summarize. Error: {str(e)}"
+        try:
+            from agent.redact import redact_sensitive_text
+            _safe_err = redact_sensitive_text(str(e), force=True)
+        except Exception:
+            _safe_err = str(e)
+        final_response = f"I reached the maximum iterations ({agent.max_iterations}) but couldn't summarize. Error: {_safe_err}"
 
     return final_response
 
