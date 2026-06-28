@@ -205,8 +205,8 @@ class Platform(Enum):
                 cls._value2member_map_[value] = pseudo
                 cls._member_map_[pseudo._name_] = pseudo
                 return pseudo
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("platform_registry lookup for %r failed: %s", value, e)
 
         return None
 
@@ -227,8 +227,8 @@ class Platform(Enum):
                         )
                     ):
                         names.add(child.name.lower())
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("bundled plugin platform scan failed: %s", e)
         return names
 
 
@@ -600,8 +600,8 @@ class GatewayConfig:
             try:
                 from hermes_cli.plugins import discover_plugins
                 discover_plugins()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("discover_plugins() failed during connected check: %s", e)
             entry = platform_registry.get(platform.value)
             if entry:
                 if entry.is_connected is not None:
@@ -609,8 +609,8 @@ class GatewayConfig:
                 if entry.validate_config is not None:
                     return entry.validate_config(config)
                 return True
-        except Exception:
-            pass  # Registry not yet initialised during early import
+        except Exception as e:
+            logger.debug("platform registry lookup failed during connected check: %s", e)
 
         return False
     
