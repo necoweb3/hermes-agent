@@ -232,9 +232,10 @@ class DeliveryRouter:
                     "result": result
                 }
             except Exception as e:
+                from agent.redact import redact_sensitive_text
                 results[target.to_string()] = {
                     "success": False,
-                    "error": str(e)
+                    "error": redact_sensitive_text(str(e))
                 }
         
         return results
