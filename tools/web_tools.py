@@ -1143,7 +1143,7 @@ async def web_extract_tool(
             {
                 "url": r.get("url", ""),
                 "title": r.get("title", ""),
-                "content": r.get("content", ""),
+                "content": redact_sensitive_text(r.get("content", "")) if r.get("content") else r.get("content", ""),
                 "error": r.get("error"),
                 **({  "blocked_by_policy": r["blocked_by_policy"]} if "blocked_by_policy" in r else {}),
             }
