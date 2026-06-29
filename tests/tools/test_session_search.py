@@ -638,3 +638,80 @@ class TestCronDemotion:
         # Interactive rows first, in original relative order; cron last, in
         # original relative order.
         assert [r["id"] for r in ordered] == [2, 4, 5, 1, 3]
+
+
+# =========================================================================
+# Compression-ended parent searchability tests (#13840)
+# =========================================================================
+
+class TestCompressionParentSearchable:
+    def test_current_child_session_excludes_delegation_parent(self, db):
+        # A parent session that is active (no compression end_reason)
+        # should still be excluded from the child's search.
+        db.create_session("s_parent", source="cli")
+        db.append_message("s_parent", role="user", content="parent question about delegation")
+        
+        db.create_session("s_child", source="cli", parent_session_id="s_parent")
+        db.append_message("s_child", role="user", content="child question")
+        db._conn.commit()
+
+        result = json.loads(session_search(
+            query="delegation",
+            current_session_id="s_child",
+            db=db,
+        ))
+        assert result["success"] is True
+        assert result["results"] == []
+
+    def test_compression_parent_searchable(self, db):
+        # A parent session that was ended due to compression
+        # should be searchable from the child session.
+        db.create_session("s_parent", source="cli")
+        db.append_message("s_parent", role="user", content="original topic before compaction")
+        db._conn.execute(
+            "UPDATE sessions SET end_reason = 'compression' WHERE id = 's_parent'"
+        )
+        
+        db.create_session("s_child", source="cli", parent_session_id="s_parent")
+        db.append_message("s_child", role="user", content="child topic")
+        db._conn.commit()
+
+        result = json.loads(session_search(
+            query="compaction",
+            current_session_id="s_child",
+            db=db,
+        ))
+        assert result["success"] is True
+        assert len(result["results"]) == 1
+        assert result["results"][0]["session_id"] == "s_parent"
+
+    def test_multi_level_compression_parent_searchable(self, db):
+        # Chain: S1 (compression) -> S2 (compression) -> S3 (active)
+        # Both S1 and S2 should be searchable from S3.
+        db.create_session("s1", source="cli")
+        db.append_message("s1", role="user", content="topic one in first session")
+        db._conn.execute(
+            "UPDATE sessions SET end_reason = 'compression' WHERE id = 's1'"
+        )
+        
+        db.create_session("s2", source="cli", parent_session_id="s1")
+        db.append_message("s2", role="user", content="topic two in second session")
+        db._conn.execute(
+            "UPDATE sessions SET end_reason = 'compression' WHERE id = 's2'"
+        )
+
+        db.create_session("s3", source="cli", parent_session_id="s2")
+        db.append_message("s3", role="user", content="current active topic")
+        db._conn.commit()
+
+        # Search for S1 topic
+        r1 = json.loads(session_search(query="topic one", current_session_id="s3", db=db))
+        assert r1["success"] is True
+        assert len(r1["results"]) == 1
+        assert r1["results"][0]["session_id"] == "s1"
+
+        # Search for S2 topic
+        r2 = json.loads(session_search(query="topic two", current_session_id="s3", db=db))
+        assert r2["success"] is True
+        assert len(r2["results"]) == 1
+        assert r2["results"][0]["session_id"] == "s2"

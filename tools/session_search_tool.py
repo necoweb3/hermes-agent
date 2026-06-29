@@ -103,6 +103,31 @@ def _resolve_to_parent(db, session_id: str) -> str:
     return cur
 
 
+def _get_active_lineage(db, session_id: Optional[str]) -> set[str]:
+    """Get the set of session IDs in the active, uncompressed lineage of session_id."""
+    active_lineage = set()
+    if not session_id:
+        return active_lineage
+    cur = session_id
+    while cur and cur not in active_lineage:
+        active_lineage.add(cur)
+        try:
+            s = db.get_session(cur)
+            if not s:
+                break
+            parent = s.get("parent_session_id")
+            if not parent:
+                break
+            parent_session = db.get_session(parent)
+            if parent_session and parent_session.get("end_reason") == "compression":
+                break
+            cur = parent
+        except Exception as e:
+            logging.debug("Error resolving active lineage for %s: %s", cur, e, exc_info=True)
+            break
+    return active_lineage
+
+
 def _order_for_recall(raw_results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Stable-sort FTS rows so interactive sessions rank above automation.
 
@@ -432,7 +457,7 @@ def _normalize_title_query(query: str) -> str:
 def _title_match_result(
     db,
     query: str,
-    current_lineage_root: Optional[str],
+    current_active_lineage: Optional[set[str]],
 ) -> Optional[Dict[str, Any]]:
     """Return a discovery-shaped result when the query matches a session title."""
     title_query = _normalize_title_query(query)
@@ -447,10 +472,10 @@ def _title_match_result(
     if not session_id:
         return None
 
-    lineage_root = _resolve_to_parent(db, session_id)
-    if current_lineage_root and lineage_root == current_lineage_root:
+    if current_active_lineage and session_id in current_active_lineage:
         return None
 
+    lineage_root = _resolve_to_parent(db, session_id)
     try:
         session_meta = db.get_session(lineage_root) or db.get_session(session_id) or {}
     except Exception:
@@ -506,8 +531,8 @@ def _discover(
 ) -> str:
     """Discovery shape: FTS5 + anchored window + bookends per hit. Single call."""
     role_list = role_filter if role_filter else ["user", "assistant"]
-    current_lineage_root = _resolve_to_parent(db, current_session_id) if current_session_id else None
-    title_result = _title_match_result(db, query, current_lineage_root)
+    current_active_lineage = _get_active_lineage(db, current_session_id) if current_session_id else set()
+    title_result = _title_match_result(db, query, current_active_lineage)
 
     try:
         raw_results = db.search_messages(
@@ -557,8 +582,8 @@ def _discover(
             break
         raw_sid = r["session_id"]
         resolved_sid = _resolve_to_parent(db, raw_sid)
-        # Skip the current session lineage
-        if current_lineage_root and resolved_sid == current_lineage_root:
+        # Skip if the matched session is in the active lineage of the current session
+        if current_active_lineage and raw_sid in current_active_lineage:
             continue
         if current_session_id and raw_sid == current_session_id:
             continue
