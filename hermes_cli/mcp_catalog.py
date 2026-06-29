@@ -356,6 +356,19 @@ def _install_root() -> Path:
     return root
 
 
+def _validate_bootstrap_cmd(cmd: str) -> None:
+    """Validate a bootstrap command string for dangerous shell features.
+    
+    Raises CatalogError if the command uses command substitution, eval,
+    shell pipes to interpreters, or raw network redirection.
+    """
+    dangerous = ['`', '$(', 'eval', '| bash', '| sh', '/dev/tcp', '/dev/udp', '|', 'curl', 'wget']
+    if any(d in cmd for d in dangerous):
+        raise CatalogError(
+            f"Dangerous shell features detected in bootstrap command: {cmd}"
+        )
+
+
 def _run_bootstrap(cwd: Path, commands: List[str]) -> None:
     """Execute bootstrap commands in *cwd*. Raise CatalogError on first failure.
 
@@ -363,6 +376,7 @@ def _run_bootstrap(cwd: Path, commands: List[str]) -> None:
     streamed to the user's terminal for visibility.
     """
     for cmd in commands:
+        _validate_bootstrap_cmd(cmd)
         print(color(f"  $ {cmd}", Colors.DIM))
         proc = subprocess.run(cmd, cwd=str(cwd), shell=True)
         if proc.returncode != 0:

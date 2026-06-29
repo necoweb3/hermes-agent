@@ -866,13 +866,16 @@ def _run_cua_driver_installer(label: str = "Installing", verbose: bool = True) -
             f'"{ps_oneliner}"'
         )
     else:
-        install_cmd = (
+        install_cmd = [
+            "/bin/bash", "-c",
+            "$(curl -fsSL https://raw.githubusercontent.com/trycua/cua/main/libs/cua-driver/scripts/install.sh)"
+        ]
+        use_shell = False
+        manual_hint = (
             "/bin/bash -c \"$(curl -fsSL "
             "https://raw.githubusercontent.com/trycua/cua/main/"
             "libs/cua-driver/scripts/install.sh)\""
         )
-        use_shell = True
-        manual_hint = install_cmd
 
     if verbose:
         _print_info(f"    {label} cua-driver (background computer-use)...")
