@@ -7562,7 +7562,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             logger.info("Gateway stopped (total teardown %.2fs)", _phase_elapsed())
 
         self._stop_task = asyncio.create_task(_stop_impl())
-        await self._stop_task
+        try:
+            await self._stop_task
+        finally:
+            self._draining = False
 
     async def wait_for_shutdown(self) -> None:
         """Wait for shutdown signal."""
