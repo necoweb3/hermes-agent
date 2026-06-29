@@ -13561,6 +13561,26 @@ def _mount_plugin_api_routes():
         api_file_name = plugin.get("_api_file")
         if not api_file_name:
             continue
+        if plugin.get("source") == "user":
+            try:
+                from hermes_cli.plugins import _get_enabled_plugins, _get_disabled_plugins
+                enabled = _get_enabled_plugins()
+                disabled = _get_disabled_plugins()
+                name = plugin["name"]
+                is_enabled = enabled is not None and name in enabled
+                is_disabled = name in disabled
+                if is_disabled or not is_enabled:
+                    _log.warning(
+                        "Plugin %s: ignoring backend api=%s (plugin is not enabled in plugins.enabled)",
+                        name, api_file_name,
+                    )
+                    continue
+            except Exception as exc:
+                _log.warning(
+                    "Plugin %s: ignoring backend api=%s due to config error: %s",
+                    plugin.get("name"), api_file_name, exc,
+                )
+                continue
         if plugin.get("source") == "project":
             _log.warning(
                 "Plugin %s: ignoring backend api=%s (project plugins may "
