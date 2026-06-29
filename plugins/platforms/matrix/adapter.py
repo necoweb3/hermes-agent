@@ -1524,6 +1524,26 @@ class MatrixAdapter(BasePlatformAdapter):
         if not content:
             return SendResult(success=True)
 
+        room_encrypted = False
+        if self._encryption:
+            state_store = getattr(self._client, "state_store", None)
+            if state_store:
+                try:
+                    room_encrypted = bool(await state_store.is_encrypted(RoomID(chat_id)))
+                except Exception:
+                    room_encrypted = False
+
+        if room_encrypted:
+            if not getattr(self._client, "crypto", None):
+                logger.error(
+                    "Matrix: refusing to send plaintext to encrypted room %s because E2EE is not functional",
+                    chat_id,
+                )
+                return SendResult(
+                    success=False,
+                    error=f"Refusing to send plaintext to encrypted room {chat_id} (E2EE client is not available/functional)",
+                )
+
         formatted = self.format_message(content)
         chunks = self.truncate_message(formatted, MAX_MESSAGE_LENGTH)
 
@@ -1533,12 +1553,27 @@ class MatrixAdapter(BasePlatformAdapter):
 
             self._apply_relation_metadata(msg_content, reply_to=reply_to, metadata=metadata)
 
+            event_type = EventType.ROOM_MESSAGE
+            payload = msg_content
+            if room_encrypted:
+                try:
+                    payload = await self._client.encrypt(
+                        RoomID(chat_id),
+                        EventType.ROOM_MESSAGE,
+                        msg_content,
+                    )
+                    event_type = EventType.ROOM_ENCRYPTED
+                except Exception as exc:
+                    logger.error("Matrix: E2EE encryption failed: %s", exc)
+                    return SendResult(success=False, error=f"Encryption failed: {exc}")
+
             try:
                 event_id = await asyncio.wait_for(
                     self._client.send_message_event(
                         RoomID(chat_id),
-                        EventType.ROOM_MESSAGE,
-                        msg_content,
+                        event_type,
+                        payload,
+                        disable_encryption=True,
                     ),
                     timeout=45,
                 )
@@ -1549,11 +1584,20 @@ class MatrixAdapter(BasePlatformAdapter):
                 if self._encryption and getattr(self._client, "crypto", None):
                     try:
                         await self._client.crypto.share_keys()
-                        event_id = await asyncio.wait_for(
-                            self._client.send_message_event(
+                        if room_encrypted:
+                            payload = await self._client.encrypt(
                                 RoomID(chat_id),
                                 EventType.ROOM_MESSAGE,
                                 msg_content,
+                            )
+                            event_type = EventType.ROOM_ENCRYPTED
+
+                        event_id = await asyncio.wait_for(
+                            self._client.send_message_event(
+                                RoomID(chat_id),
+                                event_type,
+                                payload,
+                                disable_encryption=True,
                             ),
                             timeout=45,
                         )
@@ -1657,6 +1701,26 @@ class MatrixAdapter(BasePlatformAdapter):
     ) -> SendResult:
         """Edit an existing message (via m.replace)."""
 
+        room_encrypted = False
+        if self._encryption:
+            state_store = getattr(self._client, "state_store", None)
+            if state_store:
+                try:
+                    room_encrypted = bool(await state_store.is_encrypted(RoomID(chat_id)))
+                except Exception:
+                    room_encrypted = False
+
+        if room_encrypted:
+            if not getattr(self._client, "crypto", None):
+                logger.error(
+                    "Matrix: refusing to edit message in encrypted room %s because E2EE is not functional",
+                    chat_id,
+                )
+                return SendResult(
+                    success=False,
+                    error=f"Refusing to edit message in encrypted room {chat_id} (E2EE client is not available/functional)",
+                )
+
         formatted = self.format_message(content)
         new_content = self._build_text_message_content(formatted)
         msg_content: Dict[str, Any] = {
@@ -1674,11 +1738,26 @@ class MatrixAdapter(BasePlatformAdapter):
             "event_id": message_id,
         }
 
+        event_type = EventType.ROOM_MESSAGE
+        payload = msg_content
+        if room_encrypted:
+            try:
+                payload = await self._client.encrypt(
+                    RoomID(chat_id),
+                    EventType.ROOM_MESSAGE,
+                    msg_content,
+                )
+                event_type = EventType.ROOM_ENCRYPTED
+            except Exception as exc:
+                logger.error("Matrix: E2EE encryption failed for edit_message: %s", exc)
+                return SendResult(success=False, error=f"Encryption failed: {exc}")
+
         try:
             event_id = await self._client.send_message_event(
                 RoomID(chat_id),
-                EventType.ROOM_MESSAGE,
-                msg_content,
+                event_type,
+                payload,
+                disable_encryption=True,
             )
             return SendResult(success=True, message_id=str(event_id))
         except Exception as exc:
@@ -2074,22 +2153,35 @@ class MatrixAdapter(BasePlatformAdapter):
                 error=f"Media file exceeds Matrix limit ({len(data)} > {self._max_media_bytes} bytes)",
             )
 
-        upload_data = data
-        encrypted_file = None
-        if self._encryption and getattr(self._client, "crypto", None):
+        room_encrypted = False
+        if self._encryption:
             state_store = getattr(self._client, "state_store", None)
             if state_store:
                 try:
                     room_encrypted = bool(await state_store.is_encrypted(RoomID(room_id)))
                 except Exception:
                     room_encrypted = False
-                if room_encrypted:
-                    try:
-                        from mautrix.crypto.attachments import encrypt_attachment
-                        upload_data, encrypted_file = encrypt_attachment(data)
-                    except Exception as exc:
-                        logger.error("Matrix: attachment encryption failed: %s", exc)
-                        return SendResult(success=False, error=str(exc))
+
+        if room_encrypted:
+            if not getattr(self._client, "crypto", None):
+                logger.error(
+                    "Matrix: refusing to send media to encrypted room %s because E2EE is not functional",
+                    room_id,
+                )
+                return SendResult(
+                    success=False,
+                    error=f"Refusing to send media to encrypted room {room_id} (E2EE client is not available/functional)",
+                )
+
+        upload_data = data
+        encrypted_file = None
+        if room_encrypted:
+            try:
+                from mautrix.crypto.attachments import encrypt_attachment
+                upload_data, encrypted_file = encrypt_attachment(data)
+            except Exception as exc:
+                logger.error("Matrix: attachment encryption failed: %s", exc)
+                return SendResult(success=False, error=str(exc))
 
         # Upload to homeserver.
         try:
@@ -2125,11 +2217,26 @@ class MatrixAdapter(BasePlatformAdapter):
 
         self._apply_relation_metadata(msg_content, reply_to=reply_to, metadata=metadata)
 
+        event_type = EventType.ROOM_MESSAGE
+        payload = msg_content
+        if room_encrypted:
+            try:
+                payload = await self._client.encrypt(
+                    RoomID(room_id),
+                    EventType.ROOM_MESSAGE,
+                    msg_content,
+                )
+                event_type = EventType.ROOM_ENCRYPTED
+            except Exception as exc:
+                logger.error("Matrix: E2EE encryption failed for media message event: %s", exc)
+                return SendResult(success=False, error=f"Encryption failed: {exc}")
+
         try:
             event_id = await self._client.send_message_event(
                 RoomID(room_id),
-                EventType.ROOM_MESSAGE,
-                msg_content,
+                event_type,
+                payload,
+                disable_encryption=True,
             )
             return SendResult(success=True, message_id=str(event_id))
         except Exception as exc:
@@ -2983,6 +3090,24 @@ class MatrixAdapter(BasePlatformAdapter):
 
         if not self._client:
             return None
+
+        room_encrypted = False
+        if self._encryption:
+            state_store = getattr(self._client, "state_store", None)
+            if state_store:
+                try:
+                    room_encrypted = bool(await state_store.is_encrypted(RoomID(room_id)))
+                except Exception:
+                    room_encrypted = False
+
+        if room_encrypted:
+            if not getattr(self._client, "crypto", None):
+                logger.error(
+                    "Matrix: refusing to send reaction to encrypted room %s because E2EE is not functional",
+                    room_id,
+                )
+                return None
+
         content = {
             "m.relates_to": {
                 "rel_type": "m.annotation",
@@ -2990,11 +3115,27 @@ class MatrixAdapter(BasePlatformAdapter):
                 "key": emoji,
             }
         }
+
+        event_type = EventType.REACTION
+        payload = content
+        if room_encrypted:
+            try:
+                payload = await self._client.encrypt(
+                    RoomID(room_id),
+                    EventType.REACTION,
+                    content,
+                )
+                event_type = EventType.ROOM_ENCRYPTED
+            except Exception as exc:
+                logger.error("Matrix: E2EE encryption failed for reaction: %s", exc)
+                return None
+
         try:
             resp_event_id = await self._client.send_message_event(
                 RoomID(room_id),
-                EventType.REACTION,
-                content,
+                event_type,
+                payload,
+                disable_encryption=True,
             )
             logger.debug("Matrix: sent reaction %s to %s", emoji, event_id)
             return str(resp_event_id)
