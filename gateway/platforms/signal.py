@@ -607,6 +607,25 @@ class SignalAdapter(BasePlatformAdapter):
         chat_id = sender if not is_group else f"group:{group_id}"
         chat_type = "group" if is_group else "dm"
 
+        # Early DM auth check: reject unauthorized users before any attachment
+        # downloads or API calls. Group auth is handled by group_allow_from above.
+        # Pattern matches Telegram fix #54164 — gate at the adapter level BEFORE
+        # event construction consumes resources.
+        if not is_group:
+            _source = self.build_source(
+                chat_id=chat_id or "", chat_name="",
+                chat_type=chat_type, user_id=sender or "",
+                user_name=sender_name or "",
+            )
+            _runner = getattr(getattr(self, "_message_handler", None), "__self__", None)
+            _auth_fn = getattr(_runner, "_is_user_authorized", None)
+            if callable(_auth_fn) and not _auth_fn(_source):
+                logger.warning(
+                    "[Signal] Early reject of unauthorized user %s",
+                    redact_phone(sender) if sender else "?",
+                )
+                return
+
         # Extract text and render mentions
         text = data_message.get("message", "")
         mentions = data_message.get("mentions", [])
