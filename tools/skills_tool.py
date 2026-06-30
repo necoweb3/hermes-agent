@@ -163,17 +163,23 @@ class SkillReadinessStatus(str, Enum):
 
 
 # Prompt injection detection — shared by local-skill and plugin-skill paths.
-_INJECTION_PATTERNS: list = [
-    "ignore previous instructions",
-    "ignore all previous",
-    "you are now",
-    "disregard your",
-    "forget your instructions",
-    "new instructions:",
-    "system prompt:",
-    "<system>",
-    "]]>",
-]
+# Uses the shared threat_patterns library (scope="strict") for comprehensive
+# detection including unicode bypass, multi-word bypass, and C2 patterns.
+# The old 9-pattern substring check was trivially bypassable via paraphrasing,
+# unicode homoglyphs, and indirect phrasing.
+_INJECTION_PATTERNS: list = []  # Legacy — kept for backward compat, unused
+
+
+def _scan_skill_content(content: str) -> list:
+    """Scan skill content for prompt injection patterns.
+
+    Returns a list of finding strings (empty = clean). Uses the shared
+    threat_patterns library with scope="strict" for aggressive detection
+    appropriate for user-curated skill content.
+    """
+    from tools.threat_patterns import scan_for_threats
+    pattern_ids = scan_for_threats(content, scope="strict")
+    return pattern_ids
 
 
 def set_secret_capture_callback(callback) -> None:
@@ -1148,17 +1154,17 @@ def skill_view(
             except ValueError:
                 continue
 
-        # Security: detect common prompt injection patterns
-        # (pattern list at module level as _INJECTION_PATTERNS)
-        _content_lower = content.lower()
-        _injection_detected = any(p in _content_lower for p in _INJECTION_PATTERNS)
+        # Security: detect prompt injection patterns using shared threat_patterns
+        # library (scope="strict" — aggressive detection for user-curated content)
+        _injection_findings = _scan_skill_content(content)
+        _injection_detected = bool(_injection_findings)
 
         if _outside_skills_dir or _injection_detected:
             _warnings = []
             if _outside_skills_dir:
                 _warnings.append(f"skill file is outside the trusted skills directory (~/.hermes/skills/): {skill_md}")
             if _injection_detected:
-                _warnings.append("skill content contains patterns that may indicate prompt injection")
+                _warnings.append(f"skill content contains injection patterns: {', '.join(_injection_findings)}")
             logging.getLogger(__name__).warning("Skill security warning for '%s': %s", name, "; ".join(_warnings))
 
         parsed_frontmatter: Dict[str, Any] = {}
