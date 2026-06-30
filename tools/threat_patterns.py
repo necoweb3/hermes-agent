@@ -42,7 +42,211 @@ of "ignore all instructions").  This mirrors the fix applied to
 from __future__ import annotations
 
 import re
+import unicodedata
 from typing import List, Optional, Tuple
+
+# Homoglyph mapping: characters that look like Latin letters but are from
+# other scripts (Cyrillic, Greek, etc.). Used to normalize content before
+# pattern matching to prevent homoglyph bypass attacks.
+_HOMOGLYPH_MAP: dict[int, str] = {
+    # Cyrillic → Latin
+    0x0400: "E",  # Ѐ → E
+    0x0401: "Yo", # Ё → Yo
+    0x0402: "Dj", # Ђ → Dj
+    0x0403: "G",  # Ѓ → G
+    0x0404: "Ye", # Є → Ye
+    0x0405: "Dz", # Ѕ → Dz
+    0x0406: "I",  # І → I
+    0x0407: "Yi", # Ї → Yi
+    0x0408: "J",  # Ј → J
+    0x0409: "Lj", # Љ → Lj
+    0x040A: "Nj", # Њ → Nj
+    0x040B: "Tj", # Ћ → Tj
+    0x040C: "K",  # Ќ → K
+    0x040E: "U",  # Ў → U
+    0x040F: "Dz", # Џ → Dz
+    0x0410: "A",  # А → A
+    0x0411: "B",  # Б → B
+    0x0412: "V",  # В → V
+    0x0413: "G",  # Г → G
+    0x0414: "D",  # Д → D
+    0x0415: "Ye", # Е → Ye
+    0x0416: "Zh", # Ж → Zh
+    0x0417: "Z",  # З → Z
+    0x0418: "I",  # И → I
+    0x0419: "Y",  # Й → Y
+    0x041A: "K",  # К → K
+    0x041B: "L",  # Л → L
+    0x041C: "M",  # М → M
+    0x041D: "N",  # Н → N
+    0x041E: "O",  # О → O
+    0x041F: "P",  # П → P
+    0x0420: "R",  # Р → R
+    0x0421: "S",  # С → S
+    0x0422: "T",  # Т → T
+    0x0423: "U",  # У → U
+    0x0424: "F",  # Ф → F
+    0x0425: "Kh", # Х → Kh
+    0x0426: "Ts", # Ц → Ts
+    0x0427: "Ch", # Ч → Ch
+    0x0428: "Sh", # Ш → Sh
+    0x0429: "Shch",# Щ → Shch
+    0x042A: "",   # Ъ → (hard sign, no Latin equivalent)
+    0x042B: "Y",  # Ы → Y
+    0x042C: "",   # Ь → (soft sign)
+    0x042D: "E",  # Э → E
+    0x042E: "Yu", # Ю → Yu
+    0x042F: "Ya", # Я → Ya
+    # Lowercase
+    0x0430: "a",  # а → a
+    0x0431: "b",  # б → b
+    0x0432: "v",  # в → v
+    0x0433: "g",  # г → g
+    0x0434: "d",  # д → d
+    0x0435: "ye", # е → ye
+    0x0436: "zh", # ж → zh
+    0x0437: "z",  # з → z
+    0x0438: "i",  # и → i
+    0x0439: "y",  # й → y
+    0x043A: "k",  # к → k
+    0x043B: "l",  # л → l
+    0x043C: "m",  # м → m
+    0x043D: "n",  # н → n
+    0x043E: "o",  # о → o
+    0x043F: "p",  # п → p
+    0x0440: "r",  # р → r
+    0x0441: "s",  # с → s
+    0x0442: "t",  # т → t
+    0x0443: "u",  # у → u
+    0x0444: "f",  # ф → f
+    0x0445: "kh", # х → kh
+    0x0446: "ts", # ц → ts
+    0x0447: "ch", # ч → ch
+    0x0448: "sh", # ш → sh
+    0x0449: "shch",# щ → shch
+    0x044A: "",   # ъ → (hard sign)
+    0x044B: "y",  # ы → y
+    0x044C: "",   # ь → (soft sign)
+    0x044D: "e",  # э → e
+    0x044E: "yu", # ю → yu
+    0x044F: "ya", # я → ya
+    # ʼ (Cyrillic letter reversed Komi) looks like apostrophe
+    0x0450: "è",  # ѐ → è
+    0x0451: "yo", # ё → yo
+    0x0452: "dj", # ђ → dj
+    0x0453: "g",  # ѓ → g
+    0x0454: "ye", # є → ye
+    0x0455: "dz", # ѕ → dz
+    0x0456: "i",  # і → i (CRITICAL: Ukrainian І looks identical to Latin I)
+    0x0457: "yi", # ї → yi
+    0x0458: "j",  # ј → j
+    0x0459: "lj", # љ → lj
+    0x045A: "nj", # њ → nj
+    0x045B: "tj", # ћ → tj
+    0x045C: "k",  # ќ → k
+    0x045E: "u",  # ў → u
+    0x045F: "dz", # џ → dz
+    # Greek → Latin (common homoglyphs)
+    0x0391: "A",  # Α → A
+    0x0392: "B",  # Β → B
+    0x0395: "E",  # Ε → E
+    0x0396: "Z",  # Ζ → Z
+    0x0397: "H",  # Η → H
+    0x0399: "I",  # Ι → I (CRITICAL: Greek Ι looks identical to Latin I)
+    0x039A: "K",  # Κ → K
+    0x039C: "M",  # Μ → M
+    0x039D: "N",  # Ν → N
+    0x039F: "O",  # Ο → O (CRITICAL: Greek Ο looks identical to Latin O)
+    0x03A1: "P",  # Ρ → P (CRITICAL: Greek Ρ looks identical to Latin P)
+    0x03A4: "T",  # Τ → T
+    0x03A5: "Y",  # Υ → Y
+    0x03A7: "X",  # Χ → X
+    # Lowercase
+    0x03B1: "a",  # α → a
+    0x03B2: "b",  # β → b
+    0x03B5: "e",  # ε → e
+    0x03B6: "z",  # ζ → z
+    0x03B7: "h",  # η → h
+    0x03B9: "i",  # ι → i
+    0x03BA: "k",  # κ → k
+    0x03BC: "m",  # μ → m
+    0x03BD: "n",  # ν → n
+    0x03BF: "o",  # ο → o
+    0x03C1: "p",  # ρ → p
+    0x03C4: "t",  # τ → t
+    0x03C5: "u",  # υ → u
+    0x03C7: "x",  # χ → x
+    # Fullwidth Latin (used to bypass filters)
+    0xFF21: "A",  # Ａ → A
+    0xFF22: "B",  # Ｂ → B
+    0xFF23: "C",  # Ｃ → C
+    0xFF24: "D",  # Ｄ → D
+    0xFF25: "E",  # Ｅ → E
+    0xFF26: "F",  # Ｆ → F
+    0xFF27: "G",  # Ｇ → G
+    0xFF28: "H",  # Ｈ → H
+    0xFF29: "I",  # Ｉ → I
+    0xFF2A: "J",  # Ｊ → J
+    0xFF2B: "K",  # Ｋ → K
+    0xFF2C: "L",  # Ｌ → L
+    0xFF2D: "M",  # Ｍ → M
+    0xFF2E: "N",  # Ｎ → N
+    0xFF2F: "O",  # Ｏ → O
+    0xFF30: "P",  # Ｐ → P
+    0xFF31: "Q",  # Ｑ → Q
+    0xFF32: "R",  # Ｒ → R
+    0xFF33: "S",  # Ｓ → S
+    0xFF34: "T",  # Ｔ → T
+    0xFF35: "U",  # Ｕ → U
+    0xFF36: "V",  # Ｖ → V
+    0xFF37: "W",  # Ｗ → W
+    0xFF38: "X",  # Ｘ → X
+    0xFF39: "Y",  # Ｙ → Y
+    0xFF3A: "Z",  # Ｚ → Z
+    0xFF41: "a",  # ａ → a
+    0xFF42: "b",  # ｂ → b
+    0xFF43: "c",  # ｃ → c
+    0xFF44: "d",  # ｄ → d
+    0xFF45: "e",  # ｅ → e
+    0xFF46: "f",  # ｆ → f
+    0xFF47: "g",  # ｇ → g
+    0xFF48: "h",  # ｈ → h
+    0xFF49: "i",  # ｉ → i
+    0xFF4A: "j",  # ｊ → j
+    0xFF4B: "k",  # ｋ → k
+    0xFF4C: "l",  # ｌ → l
+    0xFF4D: "m",  # ｍ → m
+    0xFF4E: "n",  # ｎ → n
+    0xFF4F: "o",  # ｏ → o
+    0xFF50: "p",  # ｐ → p
+    0xFF51: "q",  # ｑ → q
+    0xFF52: "r",  # ｒ → r
+    0xFF53: "s",  # ｓ → s
+    0xFF54: "t",  # ｔ → t
+    0xFF55: "u",  # ｕ → u
+    0xFF56: "v",  # ｖ → v
+    0xFF57: "w",  # ｗ → w
+    0xFF58: "x",  # ｘ → x
+    0xFF59: "y",  # ｙ → y
+    0xFF5A: "z",  # ｚ → z
+}
+
+
+def _normalize_homoglyphs(content: str) -> str:
+    """Replace homoglyph characters with their Latin equivalents.
+
+    This defeats attacks that use visually similar characters from other
+    scripts (Cyrillic, Greek, fullwidth) to evade regex-based scanners
+    while still being interpreted as Latin by LLMs.
+    """
+    result = []
+    for ch in content:
+        cp = ord(ch)
+        if cp in _HOMOGLYPH_MAP:
+            result.append(_HOMOGLYPH_MAP[cp])
+        else:
+            result.append(ch)
+    return "".join(result)
 
 # Each entry: (regex, pattern_id, scope)
 # scope ∈ {"all", "context", "strict"}
@@ -206,6 +410,12 @@ def scan_for_threats(content: str, scope: str = "context") -> List[str]:
     Also checks for invisible unicode characters (returned as
     ``"invisible_unicode_U+XXXX"`` so the caller can surface the offending
     codepoint in a log line).
+
+    Homoglyph defense: content with non-Latin characters in ASCII-letter
+    positions is flagged as a potential homoglyph bypass attempt. LLMs
+    interpret Cyrillic/Greek/fullwidth characters as their Latin equivalents,
+    but regex scanners see the raw Unicode. An attacker can use this to
+    evade pattern matching while the LLM still follows the injected text.
     """
     if not content:
         return []
@@ -218,6 +428,25 @@ def scan_for_threats(content: str, scope: str = "context") -> List[str]:
     invisible_hits = char_set & INVISIBLE_CHARS
     for ch in invisible_hits:
         findings.append(f"invisible_unicode_U+{ord(ch):04X}")
+
+    # Homoglyph detection — flag non-Latin characters that visually mimic
+    # ASCII letters. This catches Cyrillic 'і' (U+0456) used instead of
+    # Latin 'i', Greek 'ι' (U+03B9) for 'i', fullwidth 'ｉ' (U+FF49) for 'i', etc.
+    # The check is: if a non-Latin character has a category of "Ll" (letter, lowercase)
+    # or "Lu" (letter, uppercase) and is NOT in the basic Latin range, it's suspicious.
+    _LATIN_RANGE = set(range(0x0041, 0x005B)) | set(range(0x0061, 0x007B))  # A-Z, a-z
+    for ch in content:
+        cp = ord(ch)
+        if cp in _LATIN_RANGE:
+            continue  # Normal Latin character
+        cat = unicodedata.category(ch)
+        if cat.startswith("L") and cp > 0x007F:
+            # Non-Latin letter — potential homoglyph
+            script = unicodedata.script(ch) if hasattr(unicodedata, 'script') else "Unknown"
+            # Only flag if it looks like a Latin letter (Cyrillic, Greek, fullwidth, etc.)
+            if cp in _HOMOGLYPH_MAP:
+                findings.append(f"homoglyph_U+{cp:04X}_{unicodedata.name(ch, 'UNKNOWN')}")
+                break  # One finding is enough to flag the content
 
     # Threat patterns
     patterns = _COMPILED.get(scope)
