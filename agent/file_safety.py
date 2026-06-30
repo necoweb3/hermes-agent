@@ -205,6 +205,49 @@ def get_read_block_error(path: str) -> Optional[str]:
     """
     resolved = Path(path).expanduser().resolve()
 
+    # Symlink guard: detect symlinks that point to sensitive system paths
+    # outside the working directory. This prevents symlink-based attacks
+    # where an attacker creates ~/project/data.txt -> ~/.ssh/id_rsa.
+    try:
+        p = Path(path).expanduser()
+        if p.is_symlink():
+            target = p.resolve()
+            # Block symlinks to sensitive system paths
+            _sensitive_dirs = []
+            for home_dir in (Path.home(), Path("/root")):
+                _sensitive_dirs.extend([
+                    home_dir / ".ssh",
+                    home_dir / ".gnupg",
+                    home_dir / ".aws",
+                    home_dir / ".config" / "gcloud",
+                    home_dir / ".kube",
+                ])
+            for sensitive in _sensitive_dirs:
+                try:
+                    target.relative_to(sensitive)
+                    return (
+                        f"Access denied: {path} is a symlink pointing to {target} "
+                        "which is a sensitive system directory. "
+                        "(Defense-in-depth — not a security boundary; the "
+                        "terminal tool can still bypass.)"
+                    )
+                except ValueError:
+                    continue
+            # Block symlinks to credential files not already caught by denylist
+            _sensitive_files = (
+                "id_rsa", "id_ed25519", "id_dsa", "id_ecdsa",
+                ".git-credentials", ".netrc", ".pgpass", ".npmrc",
+            )
+            if target.name in _sensitive_files:
+                return (
+                    f"Access denied: {path} is a symlink pointing to {target} "
+                    "which is a credential file. "
+                    "(Defense-in-depth — not a security boundary; the "
+                    "terminal tool can still bypass.)"
+                )
+    except Exception:
+        pass  # If symlink check fails, continue with normal checks
+
     # Resolve BOTH the active HERMES_HOME (profile-aware) AND the global
     # Hermes root so credential stores at <root>/auth.json etc. are also
     # blocked when running under a profile (HERMES_HOME points at
