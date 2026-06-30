@@ -210,6 +210,13 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
     if agent.valid_tool_names:
         stable_parts.append(STEER_CHANNEL_NOTE)
 
+    # Anti-injection defense: teach the model to treat tool results as data.
+    # This is the system-prompt side of the architectural defense; the
+    # message-side uses <untrusted_tool_result> delimiters for high-risk tools.
+    if agent.valid_tool_names:
+        from agent.prompt_builder import TOOL_RESULT_INJECTION_DEFENSE
+        stable_parts.append(TOOL_RESULT_INJECTION_DEFENSE)
+
     # Computer-use — goes in as its own block rather than being merged into
     # tool_guidance because the content is multi-paragraph. The guidance is
     # rendered for the host platform so Windows/Linux hosts don't see

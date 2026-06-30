@@ -378,9 +378,21 @@ def make_tool_result_message(name: str, content: Any, tool_call_id: str) -> dict
 # payload is data, not instructions — the architectural piece of the
 # promptware defense.  Skipped for short outputs (under 32 chars) where the
 # overhead of the wrapper outweighs any indirect-injection risk.
+#
+# read_file: file content may contain prompt injection payloads (e.g., XML
+# tags mimicking system instructions in comments or hidden text).
+# terminal: command output may contain injection payloads from files or
+# remote data the command processes.
+# vision_analyze: image text may contain injection payloads.
+# session_search: past conversation content may contain injection payloads
+# from other sessions or prior turns.
 _UNTRUSTED_TOOL_NAMES = frozenset({
     "web_extract",
     "web_search",
+    "read_file",
+    "terminal",
+    "vision_analyze",
+    "session_search",
 })
 
 _UNTRUSTED_TOOL_PREFIXES = (
