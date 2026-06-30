@@ -501,6 +501,22 @@ def _scan_mcp_description(server_name: str, tool_name: str, description: str) ->
     return findings
 
 
+def _sanitize_mcp_description(description: str) -> str:
+    """Sanitize an MCP tool description to prevent prompt injection.
+
+    Encodes angle brackets and other potentially dangerous characters so
+    the description is treated as literal text by the LLM, not as
+    structural XML/role tags.
+    """
+    if not description:
+        return description
+    # Encode angle brackets to prevent role tag injection
+    sanitized = description.replace("<", "&lt;").replace(">", "&gt;")
+    # Strip newlines that could be used to inject fake system prompts
+    sanitized = sanitized.replace("\n", " ").replace("\r", "")
+    return sanitized
+
+
 def _prepend_path(env: dict, directory: str) -> dict:
     """Prepend *directory* to env PATH if it is not already present."""
     updated = dict(env or {})
@@ -3833,9 +3849,10 @@ def _convert_mcp_schema(server_name: str, mcp_tool) -> dict:
     safe_tool_name = sanitize_mcp_name_component(mcp_tool.name)
     safe_server_name = sanitize_mcp_name_component(server_name)
     prefixed_name = f"mcp_{safe_server_name}_{safe_tool_name}"
+    raw_description = mcp_tool.description or f"MCP tool {mcp_tool.name} from {server_name}"
     return {
         "name": prefixed_name,
-        "description": mcp_tool.description or f"MCP tool {mcp_tool.name} from {server_name}",
+        "description": _sanitize_mcp_description(raw_description),
         "parameters": _normalize_mcp_input_schema(getattr(mcp_tool, "inputSchema", None)),
     }
 
