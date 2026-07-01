@@ -7686,12 +7686,16 @@ def _default_spawn(
     profile_arg = normalize_profile_name(task.assignee)
 
     prompt = f"work kanban task {task.id}"
-    env = dict(os.environ)
+    from tools.environments.local import hermes_subprocess_env
+
+    # Kanban workers are model-driving child Hermes processes: they need
+    # provider credentials, but must not inherit gateway/tool/platform secrets
+    # from the dispatcher process.
+    env = hermes_subprocess_env(inherit_credentials=True)
 
     # Inject HERMES_HOME so the worker reads the profile-scoped config.yaml
     # (fallback_providers, toolsets, agent settings, etc.) instead of the root
-    # config.  Without this, `env = dict(os.environ)` copies only the parent's
-    # env, and when the child process starts `hermes -p <name>` the
+    # config.  When the child process starts `hermes -p <name>`, the
     # _apply_profile_override() runs *before* hermes_constants is imported.
     # If HERMES_HOME is absent from the child's env, get_hermes_home() falls
     # back to Path.home() / ".hermes" (the DEFAULT profile root), ignoring the

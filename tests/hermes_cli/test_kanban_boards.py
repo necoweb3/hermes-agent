@@ -462,6 +462,53 @@ class TestWorkerSpawnEnv:
         assert env["HERMES_KANBAN_BOARD"] == "default"
         assert env["HERMES_KANBAN_DB"] == str(fresh_home / "kanban.db")
 
+    def test_default_spawn_sanitizes_worker_env(self, fresh_home, monkeypatch):
+        captured = {}
+        workspace = fresh_home / "ws"
+        workspace.mkdir()
+
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-provider-ok")
+        monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "telegram-secret")
+        monkeypatch.setenv("AUXILIARY_TITLE_API_KEY", "aux-secret")
+        monkeypatch.setenv("GATEWAY_RELAY_SECRET", "relay-secret")
+
+        class FakeProc:
+            pid = 1
+
+        def fake_popen(cmd, *args, **kwargs):
+            captured["env"] = kwargs.get("env", {})
+            return FakeProc()
+
+        monkeypatch.setattr(subprocess, "Popen", fake_popen)
+        task = kb.Task(
+            id="t_env",
+            title="",
+            body=None,
+            assignee="teknium",
+            status="ready",
+            priority=0,
+            created_by=None,
+            created_at=0,
+            started_at=None,
+            completed_at=None,
+            workspace_kind="scratch",
+            workspace_path=str(workspace),
+            claim_lock=None,
+            claim_expires=None,
+            tenant=None,
+        )
+
+        kb._default_spawn(task, str(workspace), board=None)
+
+        env = captured["env"]
+        assert env["OPENAI_API_KEY"] == "sk-provider-ok"
+        assert env["HERMES_KANBAN_TASK"] == "t_env"
+        assert env["HERMES_KANBAN_WORKSPACE"] == str(workspace)
+        assert env["TERMINAL_CWD"] == str(workspace)
+        assert "TELEGRAM_BOT_TOKEN" not in env
+        assert "AUXILIARY_TITLE_API_KEY" not in env
+        assert "GATEWAY_RELAY_SECRET" not in env
+
 
 # ---------------------------------------------------------------------------
 # CLI surface
