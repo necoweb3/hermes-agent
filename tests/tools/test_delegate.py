@@ -1421,8 +1421,8 @@ class TestDelegationProviderIntegration(unittest.TestCase):
         Gateway platform bundles such as hermes-telegram contain both safe tools
         and blocked child-only tools. The child keeps the bundle enabled but must
         also pass a subtraction toolset so model_tools removes cronjob,
-        delegate_task, execute_code, memory, clarify, and send_message during
-        schema resolution.
+        delegate_task, execute_code, memory, skill_manage, clarify, and
+        send_message during schema resolution.
         """
         parent = _make_mock_parent(depth=0)
         parent.enabled_toolsets = ["hermes-telegram"]
@@ -1445,6 +1445,36 @@ class TestDelegationProviderIntegration(unittest.TestCase):
         self.assertEqual(kwargs["enabled_toolsets"], ["hermes-telegram"])
         self.assertIn("browser", kwargs["disabled_toolsets"])
         self.assertIn("delegate_blocked", kwargs["disabled_toolsets"])
+        self.assertNotIn("delegate_orchestrator_blocked", kwargs["disabled_toolsets"])
+
+    @patch("tools.delegate_tool._load_config", return_value={"max_spawn_depth": 2})
+    def test_build_child_agent_preserves_orchestrator_delegation_blocklist(
+        self, mock_cfg
+    ):
+        """Orchestrator children keep delegation while subtracting side effects."""
+        parent = _make_mock_parent(depth=0)
+        parent.enabled_toolsets = ["hermes-telegram"]
+        parent.disabled_toolsets = ["browser", "delegate_blocked"]
+
+        with patch("run_agent.AIAgent") as MockAgent:
+            MockAgent.return_value = MagicMock()
+            _build_child_agent(
+                task_index=0,
+                goal="coordinate delegated subtasks",
+                context=None,
+                toolsets=None,
+                model=None,
+                max_iterations=10,
+                parent_agent=parent,
+                task_count=1,
+                role="orchestrator",
+            )
+
+        _, kwargs = MockAgent.call_args
+        self.assertIn("delegation", kwargs["enabled_toolsets"])
+        self.assertIn("browser", kwargs["disabled_toolsets"])
+        self.assertIn("delegate_orchestrator_blocked", kwargs["disabled_toolsets"])
+        self.assertNotIn("delegate_blocked", kwargs["disabled_toolsets"])
 
     @patch("tools.delegate_tool._load_config")
     @patch("tools.delegate_tool._resolve_delegation_credentials")

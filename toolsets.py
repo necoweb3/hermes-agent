@@ -252,6 +252,20 @@ TOOLSETS = {
             "delegate_task",
             "clarify",
             "memory",
+            "skill_manage",
+            "send_message",
+            "execute_code",
+            "cronjob",
+        ],
+        "includes": []
+    },
+
+    "delegate_orchestrator_blocked": {
+        "description": "Tools that delegated orchestrator agents must never receive",
+        "tools": [
+            "clarify",
+            "memory",
+            "skill_manage",
             "send_message",
             "execute_code",
             "cronjob",
