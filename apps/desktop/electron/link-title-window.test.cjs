@@ -68,6 +68,25 @@ test('guardLinkTitleSession cancels downloads triggered by the title-fetch windo
   assert.ok(cancelled)
 })
 
+test('guardLinkTitleSession can cancel blocked navigation requests', () => {
+  let requestHandler = null
+  const callbacks = []
+  const session = {
+    on() {},
+    webRequest: {
+      onBeforeRequest(handler) {
+        requestHandler = handler
+      }
+    }
+  }
+
+  guardLinkTitleSession(session, url => String(url).includes('169.254.169.254'))
+  requestHandler({ url: 'http://169.254.169.254/latest/meta-data/' }, value => callbacks.push(value))
+  requestHandler({ url: 'https://example.com/' }, value => callbacks.push(value))
+
+  assert.deepEqual(callbacks, [{ cancel: true }, {}])
+})
+
 test('guardLinkTitleSession is a no-op when session.on throws', () => {
   assert.doesNotThrow(() => guardLinkTitleSession({ on() { throw new Error() } }))
 })

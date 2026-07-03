@@ -41,9 +41,18 @@ function createLinkTitleWindow(BrowserWindow, partitionSession) {
 // Cancel any download the title-fetch window triggers. Without this, a link
 // artifact URL served with Content-Disposition: attachment auto-downloads every
 // time the Artifacts page renders and fetchLinkTitle loads it.
-function guardLinkTitleSession(partitionSession) {
+function guardLinkTitleSession(partitionSession, isBlockedUrl = null) {
   try {
     partitionSession.on('will-download', (_event, item) => item.cancel())
+    if (typeof isBlockedUrl === 'function') {
+      partitionSession.webRequest?.onBeforeRequest?.((details, callback) => {
+        if (isBlockedUrl(details?.url)) {
+          callback({ cancel: true })
+          return
+        }
+        callback({})
+      })
+    }
   } catch {
     // best-effort; worst case is a spurious download
   }

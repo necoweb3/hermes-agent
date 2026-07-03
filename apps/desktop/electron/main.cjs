@@ -41,6 +41,7 @@ const {
   guardLinkTitleSession,
   readLinkTitleWindowTitle
 } = require('./link-title-window.cjs')
+const { isBlockedLinkTitleUrl } = require('./link-title-url-safety.cjs')
 const { probeGatewayWebSocket } = require('./gateway-ws-probe.cjs')
 const { adoptServedDashboardToken } = require('./dashboard-token.cjs')
 const { waitForDashboardPortAnnouncement } = require('./backend-ready.cjs')
@@ -3426,7 +3427,6 @@ const titleInflight = new Map()
 const TITLE_CACHE_LIMIT = 500
 const TITLE_BYTE_BUDGET = 96 * 1024
 const TITLE_TIMEOUT_MS = 5000
-const TITLE_MAX_REDIRECTS = 3
 // Browser-shaped UA — many bot-walled sites (GetYourGuide, Cloudflare-protected
 // pages) refuse anything that doesn't look like a real Chrome.
 const TITLE_USER_AGENT =
@@ -3497,9 +3497,6 @@ function fetchHtmlTitleWithCurl(rawUrl) {
     const args = [
       '--silent',
       '--show-error',
-      '--location',
-      '--max-redirs',
-      String(TITLE_MAX_REDIRECTS),
       '--max-time',
       String(Math.max(2, Math.ceil(TITLE_TIMEOUT_MS / 1000))),
       '--connect-timeout',
@@ -3540,7 +3537,9 @@ function getLinkTitleSession() {
   if (linkTitleSession || !app.isReady()) return linkTitleSession
   linkTitleSession = session.fromPartition('hermes:link-titles', { cache: false })
   linkTitleSession.webRequest.onBeforeRequest((details, callback) => {
-    callback({ cancel: RENDER_TITLE_BLOCKED_RESOURCES.has(details.resourceType) })
+    callback({
+      cancel: RENDER_TITLE_BLOCKED_RESOURCES.has(details.resourceType) || isBlockedLinkTitleUrl(details.url)
+    })
   })
   guardLinkTitleSession(linkTitleSession)
   return linkTitleSession
@@ -3627,6 +3626,7 @@ const usableTitle = value => (value && !TITLE_ERROR_RE.test(value) ? value : '')
 
 function fetchLinkTitle(rawUrl) {
   const url = String(rawUrl || '').trim()
+  if (isBlockedLinkTitleUrl(url)) return Promise.resolve('')
   const key = canonicalTitleCacheKey(url)
   if (!key) return Promise.resolve('')
   if (titleCache.has(key)) return Promise.resolve(titleCache.get(key))
