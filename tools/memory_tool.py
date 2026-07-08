@@ -52,9 +52,37 @@ logger = logging.getLogger(__name__)
 # (HERMES_HOME env var changes) are always respected.  The old module-level
 # constant was cached at import time and could go stale if a profile switch
 # happened after the first import.
-def get_memory_dir() -> Path:
-    """Return the profile-scoped memories directory."""
-    return get_hermes_home() / "memories"
+def get_memory_dir(owner_id: Optional[str] = None) -> Path:
+    """Return the memories directory.
+
+    When *owner_id* is provided (a multi-user gateway caller), memory is
+    scoped to a per-user subdirectory so users sharing one profile cannot
+    read or mutate each other's memory. When omitted (CLI/TUI/ACP,
+    single-user modes) the profile-global memories directory is returned for
+    full backward compatibility.
+    """
+    base = get_hermes_home() / "memories"
+    if owner_id:
+        return base / owner_id
+    return base
+
+
+def _caller_owner_id() -> Optional[str]:
+    """Resolve the calling gateway user's identity for memory ownership scoping.
+
+    In gateway mode the session env carries ``HERMES_SESSION_USER_ID``. When
+    set, memory operations are scoped to that user's subdirectory so one
+    gateway user cannot read or write another's memory. When unset
+    (CLI/TUI/ACP, single-user modes) this returns ``None`` and memory stays
+    profile-global for backward compatibility.
+
+    Returns ``None`` when the session-context module is unavailable.
+    """
+    try:
+        from gateway.session_context import get_session_env
+    except Exception:
+        return None
+    return get_session_env("HERMES_SESSION_USER_ID") or None
 
 ENTRY_DELIMITER = "\n§\n"
 
@@ -127,11 +155,17 @@ class MemoryStore:
     # turn to budget exhaustion and suppress the user's reply (issue #42405).
     _MAX_CONSOLIDATION_FAILURES_PER_TURN = 3
 
-    def __init__(self, memory_char_limit: int = 2200, user_char_limit: int = 1375):
+    def __init__(self, memory_char_limit: int = 2200, user_char_limit: int = 1375,
+                 owner_id: Optional[str] = None):
         self.memory_entries: List[str] = []
         self.user_entries: List[str] = []
         self.memory_char_limit = memory_char_limit
         self.user_char_limit = user_char_limit
+        # Owner scope for multi-user gateways. Resolved from the session env
+        # when not explicitly passed, so memory is isolated per gateway user
+        # on a shared profile. None means profile-global (CLI/TUI/ACP
+        # backward compat).
+        self._owner_id = owner_id if owner_id is not None else _caller_owner_id()
         # Frozen snapshot for system prompt -- set once at load_from_disk()
         self._system_prompt_snapshot: Dict[str, str] = {"memory": "", "user": ""}
         # Per-turn counter of failed at-capacity consolidation attempts; reset
@@ -182,7 +216,7 @@ class MemoryStore:
         Scanning is deterministic from disk bytes, so the snapshot remains
         stable for the entire session (prefix-cache invariant holds).
         """
-        mem_dir = get_memory_dir()
+        mem_dir = get_memory_dir(self._owner_id)
         mem_dir.mkdir(parents=True, exist_ok=True)
 
         self.memory_entries = self._read_file(mem_dir / "MEMORY.md")
@@ -277,9 +311,8 @@ class MemoryStore:
                     pass
             fd.close()
 
-    @staticmethod
-    def _path_for(target: str) -> Path:
-        mem_dir = get_memory_dir()
+    def _path_for(self, target: str) -> Path:
+        mem_dir = get_memory_dir(self._owner_id)
         if target == "user":
             return mem_dir / "USER.md"
         return mem_dir / "MEMORY.md"
@@ -308,7 +341,7 @@ class MemoryStore:
 
     def save_to_disk(self, target: str):
         """Persist entries to the appropriate file. Called after every mutation."""
-        get_memory_dir().mkdir(parents=True, exist_ok=True)
+        get_memory_dir(self._owner_id).mkdir(parents=True, exist_ok=True)
         self._write_file(self._path_for(target), self._entries_for(target))
 
     def _entries_for(self, target: str) -> List[str]:
