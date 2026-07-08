@@ -2812,7 +2812,11 @@ class SessionDB:
         return rowcount > 0
 
     def get_session_by_title(self, title: str) -> Optional[Dict[str, Any]]:
-        """Look up a session by exact title. Returns session dict or None."""
+        """Look up a session by exact title. Returns session dict or None.
+
+        A partial UNIQUE index (idx_sessions_title_unique) guarantees at most
+        one non-null title, so this returns the single match when present.
+        """
         with self._lock:
             cursor = self._conn.execute(
                 "SELECT * FROM sessions WHERE title = ?", (title,)
@@ -2821,12 +2825,19 @@ class SessionDB:
         return dict(row) if row else None
 
     def resolve_session_by_title(self, title: str) -> Optional[str]:
-        """Resolve a title to a session ID, preferring the latest in a lineage.
+        """Resolve a title to a session ID, preferring the most recent match.
 
-        If the exact title exists, returns that session's ID.
-        If not, searches for "title #N" variants and returns the latest one.
-        If the exact title exists AND numbered variants exist, returns the
-        latest numbered variant (the most recent continuation).
+        A title may collide across a lineage: an exact ``title`` plus one or
+        more ``title #N`` continuations. We must not blindly prefer a numbered
+        variant — if a *fresh* exact ``title`` exists that is newer than a stale
+        ``title #2`` continuation, ``/resume title`` should bind to the fresh
+        exact session, not the old continuation. So gather every candidate
+        (the exact match plus all numbered variants) and return the single
+        most-recently-started one.
+
+        This keeps the lineage behavior intact (when the continuation is the
+        newest in the chain it still wins) while fixing the duplicate/ambiguous
+        title case where an exact match is actually the latest conversation.
         """
         # First try exact match
         exact = self.get_session_by_title(title)
@@ -2842,11 +2853,15 @@ class SessionDB:
             )
             numbered = cursor.fetchall()
 
-        if numbered:
-            # Return the most recent numbered variant
-            return numbered[0]["id"]
-        elif exact:
-            return exact["id"]
+        candidates = []
+        if exact:
+            candidates.append(exact)
+        candidates.extend(numbered)
+        if candidates:
+            # Prefer the most recently-started conversation across the exact
+            # match and every numbered variant, rather than always the #N one.
+            candidates.sort(key=lambda r: r["started_at"], reverse=True)
+            return candidates[0]["id"]
         return None
 
     def get_next_title_in_lineage(self, base_title: str) -> str:

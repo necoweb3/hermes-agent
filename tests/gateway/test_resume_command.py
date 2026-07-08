@@ -402,6 +402,36 @@ class TestHandleResumeCommand:
         db.close()
 
     @pytest.mark.asyncio
+    async def test_resume_title_prefers_most_recent_when_exact_newer_than_numbered(
+        self, tmp_path
+    ):
+        """A numbered continuation can exist BEFORE a fresh exact-title session
+        (e.g. an old 'My Project #2' lingers, then the user starts a new 'My
+        Project'). ``/resume My Project`` must bind to the fresh exact session,
+        NOT the stale numbered continuation. The old code unconditionally
+        preferred any numbered variant and landed in the wrong conversation
+        (#duplicate-title)."""
+        from hermes_state import SessionDB
+        db = SessionDB(db_path=tmp_path / "state.db")
+        # Stale numbered continuation created FIRST.
+        db.create_session("stale_numbered", "telegram", user_id="12345", chat_id="67890")
+        db.set_session_title("stale_numbered", "My Project #2")
+        # Fresh exact-title session created AFTER (newer).
+        db.create_session("fresh_exact", "telegram", user_id="12345", chat_id="67890")
+        db.set_session_title("fresh_exact", "My Project")
+        db.create_session("current_session_001", "telegram", user_id="12345", chat_id="67890")
+
+        event = _make_event(text="/resume My Project")
+        runner = _make_runner(session_db=db, current_session_id="current_session_001",
+                              event=event)
+        result = await runner._handle_resume_command(event)
+
+        assert "Resumed" in result
+        call_args = runner.session_store.switch_session.call_args
+        assert call_args[0][1] == "fresh_exact"
+        db.close()
+
+    @pytest.mark.asyncio
     async def test_resume_resolves_by_session_id(self, tmp_path):
         """The gateway should accept a bare session ID, not just a title.
 

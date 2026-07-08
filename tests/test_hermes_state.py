@@ -3376,6 +3376,20 @@ class TestTitleLineage:
         # Resolving "my project #2" exactly should return s2
         assert db.resolve_session_by_title("my project #2") == "s2"
 
+    def test_resolve_prefers_most_recent_when_exact_newer_than_numbered(self, db):
+        """A stale numbered continuation created BEFORE a fresh exact-title
+        session must not win: resolving the exact title binds to the newer
+        exact session, not the old continuation."""
+        import time
+
+        db.create_session("stale", "cli")
+        db.set_session_title("stale", "my project #2")
+        time.sleep(0.01)
+        db.create_session("fresh", "cli")
+        db.set_session_title("fresh", "my project")
+
+        assert db.resolve_session_by_title("my project") == "fresh"
+
     def test_resolve_nonexistent_title(self, db):
         assert db.resolve_session_by_title("nonexistent") is None
 
