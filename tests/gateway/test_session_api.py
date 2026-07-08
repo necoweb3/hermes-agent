@@ -438,3 +438,153 @@ async def test_session_header_rejected_without_api_key(adapter, session_db):
         assert resp.status == 403
         data = await resp.json()
         assert "X-Hermes-Session-Key requires API key" in data["error"]["message"]
+
+@pytest.mark.asyncio
+async def test_list_scopes_by_session_key(auth_adapter, session_db):
+    app = _create_session_app(auth_adapter)
+    headers_a = {"Authorization": "Bearer sk-test", "X-Hermes-Session-Key": "key-A"}
+    headers_b = {"Authorization": "Bearer sk-test", "X-Hermes-Session-Key": "key-B"}
+    async with TestClient(TestServer(app)) as cli:
+        a_id = (await (await cli.post("/api/sessions", json={"title": "A"}, headers=headers_a)).json())["session"]["id"]
+        b_id = (await (await cli.post("/api/sessions", json={"title": "B"}, headers=headers_b)).json())["session"]["id"]
+
+        ids_a = [s["id"] for s in (await (await cli.get("/api/sessions", headers=headers_a)).json())["data"]]
+        ids_b = [s["id"] for s in (await (await cli.get("/api/sessions", headers=headers_b)).json())["data"]]
+        assert a_id in ids_a and b_id not in ids_a
+        assert b_id in ids_b and a_id not in ids_b
+
+
+async def _client_create_session(adapter, title, key):
+    app = _create_session_app(adapter)
+    async with TestClient(TestServer(app)) as cli:
+        resp = await cli.post(
+            "/api/sessions", json={"title": title},
+            headers={"Authorization": "Bearer sk-test", "X-Hermes-Session-Key": key},
+        )
+        return await resp.json()
+
+
+async def _client_get_session(adapter, session_id, key):
+    app = _create_session_app(adapter)
+    async with TestClient(TestServer(app)) as cli:
+        return (await cli.get(
+            f"/api/sessions/{session_id}",
+            headers={"Authorization": "Bearer sk-test", "X-Hermes-Session-Key": key},
+        )).status
+
+
+async def _client_get_messages(adapter, session_id, key):
+    app = _create_session_app(adapter)
+    async with TestClient(TestServer(app)) as cli:
+        return (await cli.get(
+            f"/api/sessions/{session_id}/messages",
+            headers={"Authorization": "Bearer sk-test", "X-Hermes-Session-Key": key},
+        )).status
+
+
+async def _client_patch_session(adapter, session_id, key):
+    app = _create_session_app(adapter)
+    async with TestClient(TestServer(app)) as cli:
+        return (await cli.patch(
+            f"/api/sessions/{session_id}", json={"title": "x"},
+            headers={"Authorization": "Bearer sk-test", "X-Hermes-Session-Key": key},
+        )).status
+
+
+async def _client_delete_session(adapter, session_id, key):
+    app = _create_session_app(adapter)
+    async with TestClient(TestServer(app)) as cli:
+        return (await cli.delete(
+            f"/api/sessions/{session_id}",
+            headers={"Authorization": "Bearer sk-test", "X-Hermes-Session-Key": key},
+        )).status
+
+
+async def _client_fork_session(adapter, session_id, key):
+    app = _create_session_app(adapter)
+    async with TestClient(TestServer(app)) as cli:
+        return (await cli.post(
+            f"/api/sessions/{session_id}/fork", json={"title": "x"},
+            headers={"Authorization": "Bearer sk-test", "X-Hermes-Session-Key": key},
+        )).status
+
+
+async def _client_chat_session(adapter, session_id, key, mock_run):
+    app = _create_session_app(adapter)
+    with patch.object(adapter, "_run_agent", mock_run):
+        async with TestClient(TestServer(app)) as cli:
+            return (await cli.post(
+                f"/api/sessions/{session_id}/chat", json={"message": "hi"},
+                headers={"Authorization": "Bearer sk-test", "X-Hermes-Session-Key": key},
+            )).status
+
+
+@pytest.mark.asyncio
+async def test_wrong_key_get_returns_404(auth_adapter, session_db):
+    app = _create_session_app(auth_adapter)
+    a_id = (await _client_create_session(auth_adapter, "A", "key-A"))["session"]["id"]
+    wrong = await _client_get_session(auth_adapter, a_id, "key-B")
+    assert wrong == 404
+
+
+@pytest.mark.asyncio
+async def test_wrong_key_messages_returns_404(auth_adapter, session_db):
+    app = _create_session_app(auth_adapter)
+    a_id = (await _client_create_session(auth_adapter, "A", "key-A"))["session"]["id"]
+    wrong = await _client_get_messages(auth_adapter, a_id, "key-B")
+    assert wrong == 404
+
+
+@pytest.mark.asyncio
+async def test_wrong_key_patch_returns_404(auth_adapter, session_db):
+    app = _create_session_app(auth_adapter)
+    a_id = (await _client_create_session(auth_adapter, "A", "key-A"))["session"]["id"]
+    wrong = await _client_patch_session(auth_adapter, a_id, "key-B")
+    assert wrong == 404
+
+
+@pytest.mark.asyncio
+async def test_wrong_key_delete_returns_404(auth_adapter, session_db):
+    app = _create_session_app(auth_adapter)
+    a_id = (await _client_create_session(auth_adapter, "A", "key-A"))["session"]["id"]
+    wrong = await _client_delete_session(auth_adapter, a_id, "key-B")
+    assert wrong == 404
+
+
+@pytest.mark.asyncio
+async def test_wrong_key_fork_returns_404(auth_adapter, session_db):
+    app = _create_session_app(auth_adapter)
+    a_id = (await _client_create_session(auth_adapter, "A", "key-A"))["session"]["id"]
+    wrong = await _client_fork_session(auth_adapter, a_id, "key-B")
+    assert wrong == 404
+
+
+@pytest.mark.asyncio
+async def test_wrong_key_chat_returns_404(auth_adapter, session_db, monkeypatch):
+    mock_run = AsyncMock(return_value=({"final_response": "x", "session_id": "s"}, {}))
+    app = _create_session_app(auth_adapter)
+    a_id = (await _client_create_session(auth_adapter, "A", "key-A"))["session"]["id"]
+    wrong = await _client_chat_session(auth_adapter, a_id, "key-B", mock_run)
+    assert wrong == 404
+    mock_run.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_ownerless_session_visible_then_claimed(auth_adapter, session_db):
+    session_id = session_db.create_session("legacy", "api_server")
+    mock_run = AsyncMock(return_value=({"final_response": "ok", "session_id": session_id}, {}))
+    app = _create_session_app(auth_adapter)
+    headers = {"Authorization": "Bearer sk-test", "X-Hermes-Session-Key": "key-A"}
+    async with TestClient(TestServer(app)) as cli:
+        # ownerless session is visible to a keyed caller
+        assert (await cli.get(f"/api/sessions/{session_id}", headers=headers)).status == 200
+        # and claimed on first keyed chat use
+        with patch.object(auth_adapter, "_run_agent", mock_run):
+            chat = await cli.post(f"/api/sessions/{session_id}/chat", json={"message": "hi"}, headers=headers)
+            assert chat.status == 200
+        # now key-B can no longer see it
+        wrong = await cli.get(
+            f"/api/sessions/{session_id}",
+            headers={"Authorization": "Bearer sk-test", "X-Hermes-Session-Key": "key-B"},
+        )
+        assert wrong.status == 404

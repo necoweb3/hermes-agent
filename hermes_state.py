@@ -1668,6 +1668,24 @@ class SessionDB:
         self._insert_session_row(session_id, source, **kwargs)
         return session_id
 
+    def set_session_model_config_value(self, session_id: str, key: str, value) -> None:
+        """Set a single ``model_config`` JSON key for *session_id* in place.
+
+        Used to record API-server session ownership (``gateway_session_key``)
+        so keyed multi-user deployments can scope session resources per owner.
+        """
+        if not session_id or not key:
+            return
+
+        def _do(conn):
+            conn.execute(
+                "UPDATE sessions SET model_config = "
+                "json_set(COALESCE(model_config, '{}'), ?, ?) WHERE id = ?",
+                (f"$.{key}", value, session_id),
+            )
+
+        self._execute_write(_do)
+
     def record_gateway_session_peer(
         self,
         session_id: str,

@@ -1680,6 +1680,75 @@ class APIServerAdapter(BasePlatformAdapter):
             return None, web.json_response(_openai_error(f"Session not found: {session_id}", code="session_not_found"), status=404)
         return session, None
 
+    # Owner session key recorded in a session's model_config. API-server
+    # sessions created with an X-Hermes-Session-Key are scoped to that key so
+    # a caller sharing the API bearer token cannot reach another keyed user's
+    # sessions (cross-user exposure in shared-key multi-user deployments).
+    _SESSION_OWNER_KEY = "gateway_session_key"
+
+    @staticmethod
+    def _session_owner_key(session: Optional[Dict[str, Any]]) -> Optional[str]:
+        """Return the owning session key recorded in *session*'s model_config."""
+        if not session:
+            return None
+        mc = session.get("model_config")
+        if not mc:
+            return None
+        if isinstance(mc, str):
+            try:
+                mc = json.loads(mc)
+            except Exception:
+                return None
+        if not isinstance(mc, dict):
+            return None
+        key = mc.get(APIServerAdapter._SESSION_OWNER_KEY)
+        return key or None
+
+    def _enforce_session_owner(
+        self, session_id: str, request: "web.Request"
+    ) -> tuple[Optional[Dict[str, Any]], Optional["web.Response"]]:
+        """Return the session if *request*'s caller may access it, else a 404.
+
+        Ownership model:
+          * Keyless (legacy / local single-user) callers see every session.
+          * Ownerless sessions stay visible to all callers (preserved legacy
+            behaviour) and are claimed by the first keyed chat/stream user.
+          * A keyed caller only reaches sessions owned by their key; a wrong
+            key returns 404 so the session's existence is not disclosed.
+        """
+        db = self._ensure_session_db()
+        if db is None:
+            return None, web.json_response(_openai_error("Session database unavailable", code="session_db_unavailable"), status=503)
+        session = db.get_session(session_id)
+        if not session:
+            return None, web.json_response(_openai_error(f"Session not found: {session_id}", code="session_not_found"), status=404)
+        caller_key, _ = self._parse_session_key_header(request)
+        owner = self._session_owner_key(session)
+        if caller_key is not None and owner is not None and caller_key != owner:
+            return None, web.json_response(_openai_error(f"Session not found: {session_id}", code="session_not_found"), status=404)
+        return session, None
+
+    def _claim_session_owner(self, session_id: str, request: "web.Request") -> None:
+        """Record *request*'s session key as the owner of *session_id* if ownerless.
+
+        Called from keyed chat/stream so an unowned legacy session becomes
+        scoped to the first keyed caller that uses it (prevents a later keyed
+        caller from reading/writing another user's adopted session).
+        """
+        caller_key, _ = self._parse_session_key_header(request)
+        if not caller_key:
+            return
+        db = self._ensure_session_db()
+        if db is None:
+            return
+        session = db.get_session(session_id)
+        if session is None or self._session_owner_key(session) is not None:
+            return
+        try:
+            db.set_session_model_config_value(session_id, self._SESSION_OWNER_KEY, caller_key)
+        except Exception:
+            logger.debug("Failed to claim session owner for %s", session_id, exc_info=True)
+
     def _conversation_history_for_session(self, session_id: str) -> List[Dict[str, Any]]:
         db = self._ensure_session_db()
         if db is None:
@@ -1711,6 +1780,11 @@ class APIServerAdapter(BasePlatformAdapter):
             include_children=include_children,
             order_by_last_active=True,
         )
+        # Scope listing to the caller's session key in keyed (multi-user)
+        # deployments; keyless/legacy callers still see every session.
+        caller_key, _ = self._parse_session_key_header(request)
+        if caller_key is not None:
+            sessions = [s for s in sessions if self._session_owner_key(s) in (None, caller_key)]
         return web.json_response({
             "object": "list",
             "data": [self._session_response(s) for s in sessions],
@@ -1746,7 +1820,16 @@ class APIServerAdapter(BasePlatformAdapter):
         system_prompt = body.get("system_prompt")
         if system_prompt is not None and not isinstance(system_prompt, str):
             return web.json_response(_openai_error("system_prompt must be a string", code="invalid_system_prompt"), status=400)
-        db.create_session(session_id, "api_server", model=str(model) if model else None, system_prompt=system_prompt)
+        owner_key, key_err = self._parse_session_key_header(request)
+        if key_err is not None:
+            return key_err
+        model_config = {"gateway_session_key": owner_key} if owner_key else None
+        db.create_session(
+            session_id, "api_server",
+            model=str(model) if model else None,
+            system_prompt=system_prompt,
+            model_config=model_config,
+        )
         title = body.get("title")
         if title is not None:
             try:
@@ -1762,7 +1845,7 @@ class APIServerAdapter(BasePlatformAdapter):
         auth_err = self._check_auth(request)
         if auth_err:
             return auth_err
-        session, err = self._get_existing_session_or_404(request.match_info["session_id"])
+        session, err = self._enforce_session_owner(request.match_info["session_id"], request)
         if err:
             return err
         return web.json_response({"object": "hermes.session", "session": self._session_response(session)})
@@ -1773,7 +1856,7 @@ class APIServerAdapter(BasePlatformAdapter):
         if auth_err:
             return auth_err
         session_id = request.match_info["session_id"]
-        session, err = self._get_existing_session_or_404(session_id)
+        session, err = self._enforce_session_owner(session_id, request)
         if err:
             return err
         body, err = await self._read_json_body(request)
@@ -1801,7 +1884,7 @@ class APIServerAdapter(BasePlatformAdapter):
         if auth_err:
             return auth_err
         session_id = request.match_info["session_id"]
-        session, err = self._get_existing_session_or_404(session_id)
+        session, err = self._enforce_session_owner(session_id, request)
         if err:
             return err
         db = self._ensure_session_db()
@@ -1814,7 +1897,7 @@ class APIServerAdapter(BasePlatformAdapter):
         if auth_err:
             return auth_err
         session_id = request.match_info["session_id"]
-        _, err = self._get_existing_session_or_404(session_id)
+        _, err = self._enforce_session_owner(session_id, request)
         if err:
             return err
         db = self._ensure_session_db()
@@ -1832,7 +1915,7 @@ class APIServerAdapter(BasePlatformAdapter):
         if auth_err:
             return auth_err
         source_id = request.match_info["session_id"]
-        source, err = self._get_existing_session_or_404(source_id)
+        source, err = self._enforce_session_owner(source_id, request)
         if err:
             return err
         body, err = await self._read_json_body(request)
@@ -1882,9 +1965,10 @@ class APIServerAdapter(BasePlatformAdapter):
         if key_err is not None:
             return key_err
         session_id = request.match_info["session_id"]
-        _, err = self._get_existing_session_or_404(session_id)
+        _, err = self._enforce_session_owner(session_id, request)
         if err:
             return err
+        self._claim_session_owner(session_id, request)
         body, err = await self._read_json_body(request)
         if err:
             return err
@@ -1926,9 +2010,10 @@ class APIServerAdapter(BasePlatformAdapter):
         if key_err is not None:
             return key_err
         session_id = request.match_info["session_id"]
-        _, err = self._get_existing_session_or_404(session_id)
+        _, err = self._enforce_session_owner(session_id, request)
         if err:
             return err
+        self._claim_session_owner(session_id, request)
         body, err = await self._read_json_body(request)
         if err:
             return err
