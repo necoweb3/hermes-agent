@@ -1371,7 +1371,7 @@ def mark_job_run(job_id: str, success: bool, error: Optional[str] = None,
                 # (issue #38758), which already incremented completed — do not
                 # double-count them here.  Recurring jobs and direct callers
                 # with no pre-run claim still get the legacy increment.
-                if job.get("repeat"):
+                if isinstance(job.get("repeat"), dict):
                     repeat = job["repeat"]
                     times = repeat.get("times")
                     completed = repeat.get("completed", 0)
@@ -1456,8 +1456,8 @@ def claim_dispatch(job_id: str) -> bool:
             if job.get("schedule", {}).get("kind") != "once":
                 return True  # recurring jobs use advance_next_run(), not dispatch claims
             repeat = job.get("repeat")
-            if not repeat:
-                return True  # no repeat limit — always dispatch
+            if not isinstance(repeat, dict):
+                return True  # no or bad repeat limit — always dispatch
             times = repeat.get("times")
             if times is None or times <= 0:
                 return True  # infinite — always dispatch
@@ -1670,6 +1670,21 @@ def _get_due_jobs_locked() -> List[Dict[str, Any]]:
                 rj.pop("last_run_at", None)
                 needs_save = True
 
+    # Normalize malformed "repeat" records. "repeat" must be a dict with
+    # "times" / "completed". A non-dict value (string, number, list, null)
+    # makes repeat.get("times") or repeat["completed"] = ... raise in
+    # mark_job_run / claim_dispatch / due recovery, aborting before save.
+    for j in jobs:
+        r = j.get("repeat")
+        if r is not None and not isinstance(r, dict):
+            j["repeat"] = None
+            needs_save = True
+    for rj in raw_jobs:
+        r = rj.get("repeat")
+        if r is not None and not isinstance(r, dict):
+            rj["repeat"] = None
+            needs_save = True
+
     # Resolve the one-shot running-claim stale-recovery TTL once per scan
     # (derived from HERMES_CRON_TIMEOUT). See _oneshot_run_claim_ttl_seconds.
     _run_claim_ttl = _oneshot_run_claim_ttl_seconds()
@@ -1822,7 +1837,7 @@ def _get_due_jobs_locked() -> List[Dict[str, Any]]:
             # recovery helper re-armed it). Remove it instead of re-firing.
             if kind == "once":
                 repeat = job.get("repeat")
-                if repeat:
+                if isinstance(repeat, dict):
                     times = repeat.get("times")
                     completed = repeat.get("completed", 0)
                     if times is not None and times > 0 and completed >= times:
