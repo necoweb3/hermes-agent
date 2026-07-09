@@ -576,3 +576,49 @@ class TestChannelAliases:
                    }):
             _apply_channel_aliases(platforms)  # should not raise
         assert platforms["whatsapp"][0]["name"] == "1"
+
+
+class TestMalformedChannelEntries:
+    """Bad (non-dict) entries in channel_directory.json must not crash resolvers."""
+
+    def test_resolve_channel_name_skips_bad_entries(self, tmp_path):
+        cache_file = _write_directory(tmp_path, {
+            "telegram": [
+                {"id": "123", "name": "good", "type": "dm"},
+                "not-a-dict",  # corruption / bad write
+                {"id": "456", "name": "another", "type": "dm"},
+                None,
+            ]
+        })
+        with patch("gateway.channel_directory.DIRECTORY_PATH", cache_file):
+            # Should not raise, should resolve the good ones
+            assert resolve_channel_name("telegram", "123") == "123"
+            assert resolve_channel_name("telegram", "good") == "123"
+            assert resolve_channel_name("telegram", "456") == "456"
+            # Non-matching should be None, not crash
+            assert resolve_channel_name("telegram", "badname") is None
+
+    def test_format_directory_for_display_skips_bad_entries(self, tmp_path):
+        cache_file = _write_directory(tmp_path, {
+            "discord": [
+                {"id": "1", "name": "general", "guild": "MyGuild"},
+                ["bad", "list", "entry"],
+                {"id": "2", "name": "offtopic"},
+            ]
+        })
+        with patch("gateway.channel_directory.DIRECTORY_PATH", cache_file):
+            out = format_directory_for_display()
+            # Should contain the good entries, no crash
+            assert "general" in out or "MyGuild" in out
+            assert "offtopic" in out
+
+    def test_lookup_channel_type_skips_bad_entries(self, tmp_path):
+        cache_file = _write_directory(tmp_path, {
+            "slack": [
+                "corrupt",
+                {"id": "C123", "name": "eng", "type": "channel"},
+            ]
+        })
+        with patch("gateway.channel_directory.DIRECTORY_PATH", cache_file):
+            assert lookup_channel_type("slack", "C123") == "channel"
+            assert lookup_channel_type("slack", "nope") is None

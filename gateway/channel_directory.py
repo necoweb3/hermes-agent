@@ -76,11 +76,13 @@ def _normalize_channel_query(value: str) -> str:
 
 def _channel_target_name(platform_name: str, channel: Dict[str, Any]) -> str:
     """Return the human-facing target label shown to users for a channel entry."""
-    name = channel["name"]
+    if not isinstance(channel, dict):
+        return "?"
+    name = channel.get("name") or "?"
     if platform_name == "discord" and channel.get("guild"):
         return f"#{name}"
     if platform_name != "discord" and channel.get("type"):
-        return f"{name} ({channel['type']})"
+        return f"{name} ({channel.get('type')})"
     return name
 
 
@@ -373,7 +375,14 @@ def load_directory() -> Dict[str, Any]:
             data = json.load(f)
         # Re-apply aliases on read so friendly names take effect immediately,
         # even between timed rebuilds and for brand-new alias entries.
-        _apply_channel_aliases(data.setdefault("platforms", {}))
+        platforms = data.setdefault("platforms", {})
+        _apply_channel_aliases(platforms)
+        # Sanitize: drop any non-dict channel entries (corruption, bad build,
+        # or manual edit of channel_directory.json). Prevents AttributeError /
+        # KeyError in resolve/format when a bad record is present.
+        for plat, chans in list(platforms.items()):
+            if isinstance(chans, list):
+                platforms[plat] = [c for c in chans if isinstance(c, dict)]
         return data
     except Exception:
         base = {"updated_at": None, "platforms": {}}
@@ -385,7 +394,7 @@ def lookup_channel_type(platform_name: str, chat_id: str) -> Optional[str]:
     """Return the channel ``type`` string (e.g. ``"channel"``, ``"forum"``) for *chat_id*, or *None* if unknown."""
     directory = load_directory()
     for ch in directory.get("platforms", {}).get(platform_name, []):
-        if ch.get("id") == chat_id:
+        if isinstance(ch, dict) and ch.get("id") == chat_id:
             return ch.get("type")
     return None
 
@@ -409,6 +418,8 @@ def resolve_channel_name(platform_name: str, name: str) -> Optional[str]:
     # in _parse_target_ref hasn't recognized them as explicit.
     raw = name.strip()
     for ch in channels:
+        if not isinstance(ch, dict):
+            continue
         if ch.get("id") == raw:
             return ch["id"]
 
@@ -416,23 +427,30 @@ def resolve_channel_name(platform_name: str, name: str) -> Optional[str]:
 
     # 1. Exact name match, including the display labels shown by send_message(action="list")
     for ch in channels:
-        if _normalize_channel_query(ch["name"]) == query:
-            return ch["id"]
+        if not isinstance(ch, dict):
+            continue
+        if _normalize_channel_query(ch.get("name", "")) == query:
+            return ch.get("id")
         if _normalize_channel_query(_channel_target_name(platform_name, ch)) == query:
-            return ch["id"]
+            return ch.get("id")
 
     # 2. Guild-qualified match for Discord ("GuildName/channel")
     if "/" in query:
         guild_part, ch_part = query.rsplit("/", 1)
         for ch in channels:
+            if not isinstance(ch, dict):
+                continue
             guild = ch.get("guild", "").strip().lower()
-            if guild == guild_part and _normalize_channel_query(ch["name"]) == ch_part:
-                return ch["id"]
+            if guild == guild_part and _normalize_channel_query(ch.get("name", "")) == ch_part:
+                return ch.get("id")
 
     # 3. Partial prefix match (only if unambiguous)
-    matches = [ch for ch in channels if _normalize_channel_query(ch["name"]).startswith(query)]
+    matches = []
+    for ch in channels:
+        if isinstance(ch, dict) and _normalize_channel_query(ch.get("name", "")).startswith(query):
+            matches.append(ch)
     if len(matches) == 1:
-        return matches[0]["id"]
+        return matches[0].get("id")
 
     return None
 
@@ -451,6 +469,9 @@ def format_directory_for_display() -> str:
         if not channels:
             continue
 
+        # Guard against non-dict entries (corrupted channel_directory.json)
+        channels = [c for c in channels if isinstance(c, dict)]
+
         # Group Discord channels by guild
         if plat_name == "discord":
             guilds: Dict[str, List] = {}
@@ -464,7 +485,7 @@ def format_directory_for_display() -> str:
 
             for guild_name, guild_channels in sorted(guilds.items()):
                 lines.append(f"Discord ({guild_name}):")
-                for ch in sorted(guild_channels, key=lambda c: c["name"]):
+                for ch in sorted(guild_channels, key=lambda c: c.get("name") or ""):
                     lines.append(f"  discord:{_channel_target_name(plat_name, ch)}")
             if dms:
                 lines.append("Discord (DMs):")
