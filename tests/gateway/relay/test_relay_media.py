@@ -18,6 +18,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Optional
 
+from unittest.mock import patch
+
 import pytest
 
 from gateway.config import PlatformConfig
@@ -281,3 +283,82 @@ async def test_client_upload_rejects_oversize_and_missing(tmp_path: Path):
     empty = tmp_path / "empty.bin"
     empty.write_bytes(b"")
     assert await c.upload(str(empty)) is None
+
+@pytest.mark.asyncio
+async def test_download_blocks_private_metadata_url_before_network():
+    """Cloud metadata / private IPs must never be opened (gateway SSRF)."""
+    import gateway.relay.media as media_mod
+
+    c = RelayMediaClient("https://c.example", "gw1", "sec")
+    opened = []
+
+    def _boom(req, timeout=None):
+        opened.append(req.full_url)
+        raise AssertionError("urlopen must not be called for unsafe URLs")
+
+    with patch.object(media_mod, "_open_url", side_effect=_boom):
+        assert await c.download("http://169.254.169.254/latest/meta-data/") is None
+        assert await c.download("http://127.0.0.1:8080/secret") is None
+        assert await c.download("http://10.0.0.5/internal") is None
+    assert opened == []
+
+
+@pytest.mark.asyncio
+async def test_download_blocks_redirect_to_private_address(tmp_path: Path):
+    """A public URL that 302s to a private hop must fail closed."""
+    import gateway.relay.media as media_mod
+    import urllib.error
+    import urllib.request
+
+    c = RelayMediaClient("https://c.example", "gw1", "sec")
+
+    # Simulate redirect validation by invoking the handler directly.
+    handler = media_mod._SSRFSafeRedirectHandler()
+    # Build a minimal redirect request context. HTTPRedirectHandler.redirect_request
+    # needs req, fp, code, msg, headers, newurl.
+    req = urllib.request.Request("https://cdn.example/image.png")
+    class _FP:
+        def read(self):
+            return b""
+        def close(self):
+            pass
+    headers = {"Location": "http://169.254.169.254/latest/meta-data/"}
+    try:
+        handler.redirect_request(
+            req, _FP(), 302, "Found", headers, "http://169.254.169.254/latest/meta-data/"
+        )
+        raised = False
+    except urllib.error.URLError as exc:
+        raised = True
+        assert "169.254.169.254" in str(exc) or "Blocked" in str(exc)
+    assert raised, "expected SSRF redirect to raise URLError"
+
+
+@pytest.mark.asyncio
+async def test_download_allows_public_url_when_open_succeeds(tmp_path: Path):
+    """Public URLs still download when the open path returns bytes."""
+    import gateway.relay.media as media_mod
+    from io import BytesIO
+    from unittest.mock import MagicMock
+
+    c = RelayMediaClient("https://c.example", "gw1", "sec")
+    payload = b"\x89PNG\r\n\x1a\n" + b"x" * 32
+
+    class _Resp:
+        headers = {"Content-Type": "image/png", "Content-Length": str(len(payload))}
+
+        def read(self, n=-1):
+            return payload
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    with patch.object(media_mod, "_open_url", return_value=_Resp()), \
+         patch("tools.url_safety.is_safe_url", return_value=True):
+        path = await c.download("https://cdn.example/a.png")
+    assert path is not None
+    assert Path(path).read_bytes() == payload
+    Path(path).unlink(missing_ok=True)
